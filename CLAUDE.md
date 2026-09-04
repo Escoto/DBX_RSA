@@ -54,18 +54,33 @@ verified with `databricks bundle summary -t dev`:
 | Analytics schema | `schemas.movies` | **currently `movies_analytics_dev.movies_analytics_dev`** — see the known issue below | `resources/lakehouse.yml` |
 | SQL warehouse | `sql_warehouses.movies_analytics_warehouse` | `movies_analytics`, id `50b70f5e18138968`, serverless PRO 2X-Small, auto-stop 20 min | `resources/lakehouse.yml` |
 
+**Phase 1 complete.** `resources/app.yml`, `movies_app/app.yaml`,
+`requirements.txt`, the FastAPI skeleton (`serve.py`, `main.py`, `config.py`,
+`db.py`, `/api/health`) and a Vue/Vite scaffold are in place. The app is
+deployed and `RUNNING` (`databricks apps get movies-app -p movies`); its service
+principal is recorded in §10. The `lakehouse.yml` schema-name issue is fixed and
+deployed — the schema is `movies_analytics_dev.movies`. Note `bundle summary`
+still prints `URL: (not deployed)` for the app under the direct engine; trust
+`apps get` instead.
+
+**Phase 2 complete.** `src/seed/ddl.sql` (7 tables, 9 FKs, 3 unique constraints,
+8 checks) and `src/seed/seed_lakebase.py` (deterministic, idempotent, with
+`--reset`, `--recreate` and `--app-sp-client-id`) are applied to
+`movies-app-dev`. Verified live: 8/3/5/600/70/54/128 rows; a duplicate
+`(showtime_id, seat_id)` raises `uq_booking_seats_showtime_seat`; a
+cross-auditorium seat raises one of the composite FKs; the app SP holds
+USAGE + full DML on all 7 tables; all 7 tables are queryable through Unity
+Catalog as `movies_app_dev.movies.*` from the `movies_analytics` warehouse.
+`docs/DATA_MODEL.md` and `docs/DECISIONS.md` written.
+
 Also in the repo: `src/seed/check_connection.py` (proves the OAuth → Postgres
-path; verified against `movies-app-dev`), `movies_app_vue/` (an old Vue/Vite
-placeholder SPA that nothing deploys; its `tokens.css` is worth reusing, the
-rest gets replaced in Phase 1), empty `docs/`, the `databricks-engineer` agent
-and the `/build-check` command.
+path), `movies_app_vue/` (**dead** — the old placeholder SPA; `tokens.css` has
+already been carried into `movies_app/frontend/`, so the directory should be
+deleted), the `databricks-engineer` agent and the `/build-check` command.
 
-**Not built yet:** the app resource and `app.yaml`, backend, frontend, DDL and
-seed script, analytics job, docs, tests.
-
-**Known issue to fix first.** In `resources/lakehouse.yml` the schema has
-`name: ${var.catalog}`; it must be `name: ${var.schema}`. Redeploying replaces
-the empty schema with `movies_analytics_dev.movies`.
+**Not built yet:** the real backend routers and booking service (Phase 3), the
+frontend routes and seat map (Phase 4), the analytics job (Phase 6), tests, and
+the remaining docs.
 
 **Hazards (still live)**
 
@@ -174,10 +189,16 @@ the credential and connection logic — reuse it.
 | `movies` | `movie_id text` | title, synopsis, genre, rating, runtime_min, poster_url | PK |
 | `theaters` | `theater_id text` | name, city, address | PK |
 | `auditoriums` | `auditorium_id text` | theater_id, name, row_count, seats_per_row | PK, FK → theaters |
-| `seats` | `seat_id text` | auditorium_id, row_label, seat_number, seat_type | PK, FK → auditoriums, `CHECK seat_type IN ('standard','premium','accessible')`, `UNIQUE (auditorium_id, row_label, seat_number)` |
-| `showtimes` | `showtime_id text` | movie_id, auditorium_id, starts_at timestamptz, price_standard numeric(8,2), price_premium numeric(8,2) | PK, FK → movies, FK → auditoriums |
+| `seats` | `seat_id text` | auditorium_id, row_label, seat_number, seat_type | PK, FK → auditoriums, `CHECK seat_type IN ('standard','premium','accessible')`, `UNIQUE (auditorium_id, row_label, seat_number)`, `UNIQUE (seat_id, auditorium_id)` (FK target) |
+| `showtimes` | `showtime_id text` | movie_id, auditorium_id, starts_at timestamptz, price_standard numeric(8,2), price_premium numeric(8,2) | PK, FK → movies, FK → auditoriums, `UNIQUE (showtime_id, auditorium_id)` (FK target) |
 | `bookings` | `booking_id uuid default gen_random_uuid()` | showtime_id, customer_name, customer_email, status, total_amount numeric(10,2), created_at, cancelled_at | PK, FK → showtimes, `CHECK status IN ('CONFIRMED','CANCELLED')` |
-| `booking_seats` | (`booking_id`, `seat_id`) | showtime_id, seat_id, price numeric(8,2) | PK, FK → bookings (ON DELETE CASCADE), FK → seats, FK → showtimes, **`UNIQUE (showtime_id, seat_id)`**, index on `showtime_id` |
+| `booking_seats` | (`booking_id`, `seat_id`) | showtime_id, seat_id, **auditorium_id**, price numeric(8,2) | PK, FK → bookings (ON DELETE CASCADE), **`UNIQUE (showtime_id, seat_id)`**, composite FK `(seat_id, auditorium_id)` → seats, composite FK `(showtime_id, auditorium_id)` → showtimes, index on `showtime_id` |
+
+`auditorium_id` on `booking_seats` is denormalised so the two composite FKs can
+force the seat and the showtime into the *same* room — booking a seat into a
+showtime playing elsewhere is unrepresentable, not merely validated against. The
+API still checks membership first so a bad request gets a precise 422. See
+`docs/DECISIONS.md` ADR-001.
 
 The DDL lives in `src/seed/ddl.sql` (idempotent: `CREATE SCHEMA IF NOT EXISTS`,
 `CREATE TABLE IF NOT EXISTS`). Document the ERD as a mermaid `erDiagram` in
@@ -189,14 +210,17 @@ auditorium `LEFT JOIN booking_seats ON showtime_id = ? AND seat_id` →
 
 ```
 POST /api/bookings {showtime_id, seat_ids[], customer{name,email}}
-1. Validate: showtime exists and starts_at > now(); 1 ≤ n ≤ 8; seat_ids belong to the showtime's auditorium.
+1. Validate: showtime exists and starts_at > now(); 1 ≤ n ≤ 8; seat_ids belong to the showtime's auditorium (→ 422 naming the offending ids).
 2. BEGIN
      INSERT INTO bookings (showtime_id, customer_name, customer_email, status, total_amount)
        VALUES (...) RETURNING booking_id;
-     INSERT INTO booking_seats (booking_id, showtime_id, seat_id, price)
-       SELECT %s, %s, s.seat_id, CASE s.seat_type WHEN 'premium' THEN st.price_premium ELSE st.price_standard END
-       FROM seats s JOIN showtimes st ON st.showtime_id = %s
-       WHERE s.seat_id = ANY(%s);
+     INSERT INTO booking_seats (booking_id, showtime_id, seat_id, auditorium_id, price)
+       SELECT %s, st.showtime_id, s.seat_id, s.auditorium_id,
+              CASE s.seat_type WHEN 'premium' THEN st.price_premium ELSE st.price_standard END
+       FROM seats s JOIN showtimes st ON st.auditorium_id = s.auditorium_id
+       WHERE st.showtime_id = %s AND s.seat_id = ANY(%s);
+     -- the join on auditorium_id means a foreign seat yields no row; compare
+     -- rowcount to len(seat_ids) as a second guard behind the composite FKs.
      UPDATE bookings SET total_amount = (SELECT sum(price) FROM booking_seats WHERE booking_id = %s) WHERE booking_id = %s;
    COMMIT → 201 Booking
 3. psycopg.errors.UniqueViolation → ROLLBACK → re-query which requested seats are taken → 409 {detail, taken_seat_ids}

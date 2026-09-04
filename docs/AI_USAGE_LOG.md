@@ -77,3 +77,41 @@ conventions, and the standing instruction to log decisions as ADRs.
 
 **Rough split:** ~85% AI (code, DDL, docs, verification), ~15% human (spec,
 the defence-in-depth call, review).
+
+---
+
+## Phase 2 addendum — code review of the data layer (2026-09-04)
+
+**What happened:** a second AI pass (Claude Opus, `/code-review`) over the
+Phase 2 output reported five findings, two of them verified against the live
+database rather than by inspection. A third AI pass (Claude Fable) reviewed the
+review before anything was changed, and re-probed the database read-only.
+
+**The finding that mattered.** ADR-001 closed the seat ↔ auditorium gap and was
+written as the ADR about closing exactly this class of gap. The same session
+left the neighbouring one open: `booking_seats` referenced its header on
+`booking_id` alone, so a seat row could name a different showtime than its
+booking. The review proved it live. The fix is the ADR-001 shape one
+relationship over (ADR-003). An honest data point: AI found and fixed one
+instance of a pattern, wrote it up, and missed the second instance in the same
+table. Review by a second pass caught it; the human had not.
+
+**Where the second review was wrong, and the third caught it.** The review
+claimed `--recreate` drops the app's grants. Probing `pg_default_acl` showed the
+owner's `ALTER DEFAULT PRIVILEGES` persists, so recreated tables get the grants
+back automatically on this instance; only a fresh database is exposed. The
+fix shrank from a hard guard to a warning plus a grants section in the report,
+and the ADR-002 note was corrected.
+
+**Human decisions:** take four of the five findings now rather than the two the
+review proposed (the schema rebuild was happening anyway, so the `cancelled_at`
+CHECK and the scoped total recompute ride along); keep the rolling showtime
+window and document the re-run behaviour instead of pinning dates; run the
+`--recreate` and the git cleanup by hand from the console.
+
+**Files touched:** `ddl.sql`, `seed_lakebase.py`, `main.py` (a comment),
+`DECISIONS.md` (ADR-003, ADR-002 note), `DATA_MODEL.md`, `CLAUDE.md` §2/§4.3,
+`README.md`, this file.
+
+**Rough split for the addendum:** ~90% AI (review, counter-review, edits),
+~10% human (the four-of-five call, the rolling-window call, execution).

@@ -63,10 +63,15 @@ deployed — the schema is `movies_analytics_dev.movies`. Note `bundle summary`
 still prints `URL: (not deployed)` for the app under the direct engine; trust
 `apps get` instead.
 
-**Phase 2 complete.** `src/seed/ddl.sql` (7 tables, 9 FKs, 3 unique constraints,
-8 checks) and `src/seed/seed_lakebase.py` (deterministic, idempotent, with
-`--reset`, `--recreate` and `--app-sp-client-id`) are applied to
-`movies-app-dev`. Verified live: 8/3/5/600/70/54/128 rows; a duplicate
+**Phase 2 complete.** `src/seed/ddl.sql` (7 tables, 8 FKs of which 3 composite,
+5 unique constraints, 11 checks) and `src/seed/seed_lakebase.py` (deterministic,
+idempotent, with `--reset`, `--recreate` and `--app-sp-client-id`) are applied to
+`movies-app-dev`. Post-review fixes (ADR-003, 2026-09-04): the FK from
+`booking_seats` to `bookings` is now composite on `(booking_id, showtime_id)`,
+`bookings` has a status/`cancelled_at` CHECK, the seed's total recompute is
+scoped to seeded ids, and its report prints the constraint inventory and the
+app role's grants. Those schema changes reach the live instance only through
+`seed_lakebase.py --recreate --app-sp-client-id …` (pending the user's run). Verified live: 8/3/5/600/70/54/128 rows; a duplicate
 `(showtime_id, seat_id)` raises `uq_booking_seats_showtime_seat`; a
 cross-auditorium seat raises one of the composite FKs; the app SP holds
 USAGE + full DML on all 7 tables; all 7 tables are queryable through Unity
@@ -74,9 +79,9 @@ Catalog as `movies_app_dev.movies.*` from the `movies_analytics` warehouse.
 `docs/DATA_MODEL.md` and `docs/DECISIONS.md` written.
 
 Also in the repo: `src/seed/check_connection.py` (proves the OAuth → Postgres
-path), `movies_app_vue/` (**dead** — the old placeholder SPA; `tokens.css` has
-already been carried into `movies_app/frontend/`, so the directory should be
-deleted), the `databricks-engineer` agent and the `/build-check` command.
+path), the `databricks-engineer` agent and the `/build-check` command. The old
+placeholder SPA `movies_app_vue/` was deleted on 2026-09-04 (`tokens.css` had
+already been carried into `movies_app/frontend/`).
 
 **Not built yet:** the real backend routers and booking service (Phase 3), the
 frontend routes and seat map (Phase 4), the analytics job (Phase 6), tests, and
@@ -191,14 +196,16 @@ the credential and connection logic — reuse it.
 | `auditoriums` | `auditorium_id text` | theater_id, name, row_count, seats_per_row | PK, FK → theaters |
 | `seats` | `seat_id text` | auditorium_id, row_label, seat_number, seat_type | PK, FK → auditoriums, `CHECK seat_type IN ('standard','premium','accessible')`, `UNIQUE (auditorium_id, row_label, seat_number)`, `UNIQUE (seat_id, auditorium_id)` (FK target) |
 | `showtimes` | `showtime_id text` | movie_id, auditorium_id, starts_at timestamptz, price_standard numeric(8,2), price_premium numeric(8,2) | PK, FK → movies, FK → auditoriums, `UNIQUE (showtime_id, auditorium_id)` (FK target) |
-| `bookings` | `booking_id uuid default gen_random_uuid()` | showtime_id, customer_name, customer_email, status, total_amount numeric(10,2), created_at, cancelled_at | PK, FK → showtimes, `CHECK status IN ('CONFIRMED','CANCELLED')` |
-| `booking_seats` | (`booking_id`, `seat_id`) | showtime_id, seat_id, **auditorium_id**, price numeric(8,2) | PK, FK → bookings (ON DELETE CASCADE), **`UNIQUE (showtime_id, seat_id)`**, composite FK `(seat_id, auditorium_id)` → seats, composite FK `(showtime_id, auditorium_id)` → showtimes, index on `showtime_id` |
+| `bookings` | `booking_id uuid default gen_random_uuid()` | showtime_id, customer_name, customer_email, status, total_amount numeric(10,2), created_at, cancelled_at | PK, FK → showtimes, `CHECK status IN ('CONFIRMED','CANCELLED')`, `CHECK ((status='CANCELLED') = (cancelled_at IS NOT NULL))`, `UNIQUE (booking_id, showtime_id)` (FK target) |
+| `booking_seats` | (`booking_id`, `seat_id`) | showtime_id, seat_id, **auditorium_id**, price numeric(8,2) | PK, composite FK `(booking_id, showtime_id)` → bookings (ON DELETE CASCADE), **`UNIQUE (showtime_id, seat_id)`**, composite FK `(seat_id, auditorium_id)` → seats, composite FK `(showtime_id, auditorium_id)` → showtimes, index on `showtime_id` |
 
 `auditorium_id` on `booking_seats` is denormalised so the two composite FKs can
 force the seat and the showtime into the *same* room — booking a seat into a
 showtime playing elsewhere is unrepresentable, not merely validated against. The
-API still checks membership first so a bad request gets a precise 422. See
-`docs/DECISIONS.md` ADR-001.
+FK to `bookings` carries `showtime_id` for the same reason: a seat row cannot
+name a different showtime than its own header. The API still checks membership
+first so a bad request gets a precise 422. See `docs/DECISIONS.md` ADR-001 and
+ADR-003.
 
 The DDL lives in `src/seed/ddl.sql` (idempotent: `CREATE SCHEMA IF NOT EXISTS`,
 `CREATE TABLE IF NOT EXISTS`). Document the ERD as a mermaid `erDiagram` in
@@ -447,10 +454,24 @@ databricks apps get movies-app -p movies       # URL, status, service_principal_
 # runtime logs: Databricks UI → Compute → Apps → movies-app → Logs
 ```
 
-**Python for seed / check scripts and the local backend.** WSL Python 3.12
-cannot create venvs until the user runs `sudo apt install python3.12-venv`.
-Until then use Windows Python 3.13 (has `psycopg` and `databricks-sdk`) and let
-the SDK read the WSL profile file. Git Bash syntax, from the repo root:
+**Python for seed / check scripts and the local backend.** Two working options.
+
+*From WSL (preferred, matches the Apps runtime):* `/usr/bin/python3.11`
+(3.11.15) has `databricks-sdk` in the user site-packages; `psycopg` is added
+with `python3.11 -m pip install --user "psycopg[binary]"`. The profile file is
+at its default path, so only the profile name is needed. From
+`/mnt/c/repos/apps/dbx-movies-app`:
+
+```bash
+DATABRICKS_CONFIG_PROFILE=movies python3.11 movies_app_bundle/src/seed/seed_lakebase.py --app-sp-client-id <client-id>
+```
+
+Do not use the system `python3` (3.12): it has neither package, is marked
+externally-managed, and cannot create venvs until `sudo apt install
+python3.12-venv`.
+
+*From Windows (Git Bash):* Windows Python 3.13 has both packages; point the SDK
+at the WSL profile file. From the repo root:
 
 ```bash
 DATABRICKS_CONFIG_FILE=//wsl.localhost/Ubuntu-24.04/home/raescoto/.databrickscfg DATABRICKS_CONFIG_PROFILE=movies python movies_app_bundle/src/seed/check_connection.py

@@ -5,8 +5,10 @@
 --   * booking_seats UNIQUE (showtime_id, seat_id) makes double-booking impossible;
 --     concurrent inserts for the same seat serialize on the unique index and the
 --     loser gets a unique violation, which the API translates to HTTP 409.
---   * FKs keep seats inside the auditorium that the showtime plays in.
---   * CHECKs pin the small enumerations (seat_type, booking status).
+--   * Composite FKs keep every seat row inside the auditorium the showtime plays
+--     in, and on the same showtime as its booking header (ADR-001, ADR-003).
+--   * CHECKs pin the small enumerations (seat_type, booking status) and keep
+--     status and cancelled_at in step.
 -- Delta cannot enforce any of this, which is why the OLTP side lives on Lakebase
 -- and the Delta side is the analytics copy.
 --
@@ -93,7 +95,14 @@ CREATE TABLE IF NOT EXISTS bookings (
                         CHECK (status IN ('CONFIRMED', 'CANCELLED')),
     total_amount   numeric(10, 2) NOT NULL DEFAULT 0 CHECK (total_amount >= 0),
     created_at     timestamptz NOT NULL DEFAULT now(),
-    cancelled_at   timestamptz
+    cancelled_at   timestamptz,
+    -- status and cancelled_at move together: CANCELLED if and only if a
+    -- cancellation time is set. Cancellation must update both in one statement.
+    CONSTRAINT ck_bookings_cancelled_at
+        CHECK ((status = 'CANCELLED') = (cancelled_at IS NOT NULL)),
+    -- Redundant given the PK; exists so booking_seats can carry a composite FK
+    -- that pins each seat row to its header's showtime (ADR-003).
+    CONSTRAINT uq_bookings_id_showtime UNIQUE (booking_id, showtime_id)
 );
 
 CREATE INDEX IF NOT EXISTS ix_bookings_showtime
@@ -102,28 +111,36 @@ CREATE INDEX IF NOT EXISTS ix_bookings_showtime
 CREATE INDEX IF NOT EXISTS ix_bookings_email
     ON bookings (customer_email);
 
--- The seat allocation table, and the only place two invariants can be broken.
+-- The seat allocation table, and the only place these invariants can be broken.
 --
 -- 1. uq_booking_seats_showtime_seat: a seat is sold at most once per showtime.
 --    Concurrent inserts for the same seat serialize on this index; the loser
 --    raises a unique violation, which the API turns into a 409.
--- 2. The two composite FKs: the denormalised auditorium_id must match BOTH the
---    seat's auditorium and the showtime's auditorium, so booking a seat into a
---    showtime playing in a different room is not representable. The API checks
---    this first to return a precise 422; these constraints are the backstop that
---    holds even if the API is wrong.
+-- 2. fk_booking_seats_seat + fk_booking_seats_showtime: the denormalised
+--    auditorium_id must match BOTH the seat's auditorium and the showtime's
+--    auditorium, so booking a seat into a showtime playing in a different room
+--    is not representable. The API checks this first to return a precise 422;
+--    these constraints are the backstop that holds even if the API is wrong.
+-- 3. fk_booking_seats_booking: the FK to the header carries showtime_id too, so
+--    a seat row cannot name a different showtime than its own booking. Without
+--    it, two showtimes in the same auditorium satisfy (2) while the header
+--    points elsewhere (ADR-003). A side effect: a header's showtime_id is
+--    immutable once it has seats, which is the intended model.
 --
 -- Cancelling deletes these rows (freeing the seats) while the header survives as
 -- an audit trail, which is why the unique constraint lives here rather than on a
 -- status-aware partial index.
 CREATE TABLE IF NOT EXISTS booking_seats (
-    booking_id    uuid NOT NULL REFERENCES bookings (booking_id) ON DELETE CASCADE,
+    booking_id    uuid NOT NULL,
     seat_id       text NOT NULL,
     showtime_id   text NOT NULL,
     auditorium_id text NOT NULL,
     price         numeric(8, 2) NOT NULL CHECK (price >= 0),
     PRIMARY KEY (booking_id, seat_id),
     CONSTRAINT uq_booking_seats_showtime_seat UNIQUE (showtime_id, seat_id),
+    CONSTRAINT fk_booking_seats_booking
+        FOREIGN KEY (booking_id, showtime_id) REFERENCES bookings (booking_id, showtime_id)
+        ON DELETE CASCADE,
     CONSTRAINT fk_booking_seats_seat
         FOREIGN KEY (seat_id, auditorium_id) REFERENCES seats (seat_id, auditorium_id),
     CONSTRAINT fk_booking_seats_showtime

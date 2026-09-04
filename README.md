@@ -9,10 +9,10 @@ Bundles**.
 
 Built for the Databricks Resident Architect take-home exercise.
 
-> **Status (2026-09-04):** infrastructure deployed by the bundle (Lakebase
-> instance, Unity Catalog registration, analytics catalog and schema, SQL
-> warehouse); application build in progress. Values marked `TODO` are filled
-> in once the app is deployed.
+> **Status (2026-09-04):** infrastructure and the app shell are deployed by the
+> bundle (Lakebase instance, Unity Catalog registration, analytics catalog and
+> schema, SQL warehouse, Databricks App); the schema and seed data are loaded.
+> Backend routes, the seat-map UI and the analytics job are in progress.
 
 ---
 
@@ -20,7 +20,7 @@ Built for the Databricks Resident Architect take-home exercise.
 
 | Item | Value |
 |------|-------|
-| Databricks App URL | TODO |
+| Databricks App URL | `https://movies-app-2485046985091381.aws.databricksapps.com` |
 | Workspace | `https://dbc-66830d2c-97a4.cloud.databricks.com` (Slalom) |
 | Lakebase instance | `movies-app-dev` (CU_1, Postgres 16), database `movies`, schema `movies` |
 | Unity Catalog (transactional) | `movies_app_dev.movies` — the Lakebase database registered as a UC catalog |
@@ -109,8 +109,8 @@ erDiagram
     AUDITORIUMS { text auditorium_id PK  text theater_id FK  text name  int row_count  int seats_per_row }
     SEATS { text seat_id PK  text auditorium_id FK  text row_label  int seat_number  text seat_type }
     SHOWTIMES { text showtime_id PK  text movie_id FK  text auditorium_id FK  timestamptz starts_at  numeric price_standard  numeric price_premium }
-    BOOKINGS { uuid booking_id PK  text showtime_id FK  text customer_name  text customer_email  text status  numeric total_amount  timestamptz created_at }
-    BOOKING_SEATS { uuid booking_id PK,FK  text seat_id PK,FK  text showtime_id FK  numeric price }
+    BOOKINGS { uuid booking_id PK  text showtime_id FK  text customer_name  text customer_email  text status  numeric total_amount  timestamptz created_at  timestamptz cancelled_at }
+    BOOKING_SEATS { uuid booking_id PK,FK  text seat_id PK,FK  text showtime_id FK  text auditorium_id FK  numeric price }
 ```
 
 - Reference data (`movies`, `theaters`, `auditoriums`, `seats`, `showtimes`) is
@@ -119,6 +119,10 @@ erDiagram
 - The business invariant is **`UNIQUE (showtime_id, seat_id)` on
   `booking_seats`**, enforced by Postgres. Every constraint in the diagram is
   a real, enforced constraint.
+- `booking_seats` carries `showtime_id` and `auditorium_id` so that composite
+  foreign keys pin each seat row to its header's showtime and to the room that
+  showtime plays in. A seat sold into the wrong room, or under the wrong
+  booking, is unrepresentable rather than merely validated against.
 - The same schema is browsable in Unity Catalog as `movies_app_dev.movies`.
 
 Full notes: `docs/DATA_MODEL.md`.

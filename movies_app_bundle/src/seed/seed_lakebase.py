@@ -9,6 +9,12 @@ Everything here is deterministic (seeded RNG, derived ids) and idempotent
 (ON CONFLICT), so re-running converges on the same database instead of piling
 up duplicates. --reset truncates first, for a clean pre-demo state.
 
+Showtime ids are relative to the run date (st-d0-* is today), so the schedule
+is a rolling 7-day window: re-running on a later day WITHOUT --reset moves the
+existing showtimes, and every booking on them, forward to the new window.
+Deliberate for a demo whose date is not fixed; always re-seed with --reset
+right before the demo.
+
 Usage (Windows Python, reading the WSL CLI profile):
 
     DATABRICKS_CONFIG_FILE=//wsl.localhost/Ubuntu-24.04/home/raescoto/.databrickscfg \
@@ -348,19 +354,23 @@ def load(conn: psycopg.Connection, now: datetime) -> None:
             booking_seats,
         )
 
-        # Recompute headers from what actually landed.
+        # Recompute the seeded headers from what actually landed. Both statements
+        # are scoped to the ids this script generated, so a booking made through
+        # the app is never touched: a cancelled one keeps its seats deleted and
+        # its total_amount intact as the audit trail.
+        seeded_ids = [row[0] for row in bookings]
         cur.execute(
             "UPDATE bookings b SET total_amount = COALESCE(("
             "  SELECT sum(bs.price) FROM booking_seats bs WHERE bs.booking_id = b.booking_id"
-            "), 0)"
+            "), 0) WHERE b.booking_id = ANY(%s)",
+            (seeded_ids,),
         )
 
-        # Drop seeded headers that lost every seat to a real booking. Scoped to the
-        # ids this script generated so a booking made through the app is never touched.
+        # Drop seeded headers that lost every seat to a real booking.
         cur.execute(
             "DELETE FROM bookings b WHERE b.booking_id = ANY(%s) "
             "AND NOT EXISTS (SELECT 1 FROM booking_seats bs WHERE bs.booking_id = b.booking_id)",
-            ([row[0] for row in bookings],),
+            (seeded_ids,),
         )
     conn.commit()
     print("seed data loaded")
@@ -411,6 +421,36 @@ def report(conn: psycopg.Connection) -> None:
         for title, count in cur.fetchall():
             print(f"  {title:<24} {count}")
 
+        # What the schema actually enforces, from the catalog rather than from
+        # ddl.sql: this is the Phase 2 done-check made repeatable.
+        cur.execute(
+            "SELECT c.contype, count(*) FROM pg_constraint c "
+            "JOIN pg_namespace n ON n.oid = c.connamespace "
+            "WHERE n.nspname = %s GROUP BY c.contype ORDER BY c.contype",
+            (SCHEMA,),
+        )
+        labels = {"p": "primary key", "f": "foreign key", "u": "unique", "c": "check"}
+        print("\nconstraints")
+        for contype, count in cur.fetchall():
+            print(f"  {labels.get(contype, contype):<16} {count}")
+
+        # Never silent about grants: --recreate drops the tables, and only the
+        # owner's default privileges (or --app-sp-client-id) put them back.
+        cur.execute(
+            "SELECT grantee, count(DISTINCT table_name), "
+            "array_agg(DISTINCT privilege_type ORDER BY privilege_type) "
+            "FROM information_schema.role_table_grants "
+            "WHERE table_schema = %s AND grantee <> current_user "
+            "GROUP BY grantee ORDER BY grantee",
+            (SCHEMA,),
+        )
+        grants = cur.fetchall()
+        print("\ntable grants to roles other than the owner")
+        if not grants:
+            print("  none: the app cannot read the tables. Re-run with --app-sp-client-id.")
+        for grantee, table_count, privileges in grants:
+            print(f"  {grantee}  tables={table_count}  {','.join(privileges)}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -429,6 +469,16 @@ def main() -> int:
         help="DROP every table before applying ddl.sql. Use after a schema change.",
     )
     args = parser.parse_args()
+
+    if args.recreate and not args.app_sp_client_id:
+        # Not fatal: on this instance the owner's default privileges re-grant the
+        # app automatically (see ADR-002). On a fresh database they do not, and
+        # the app would start with no access. The report below shows which.
+        print(
+            "WARNING: --recreate without --app-sp-client-id; "
+            "check the grants section of the report.",
+            file=sys.stderr,
+        )
 
     w = WorkspaceClient()
     with connect(w) as conn:

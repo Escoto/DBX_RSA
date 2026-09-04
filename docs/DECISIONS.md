@@ -105,6 +105,78 @@ and re-applies the DDL, followed by the normal deterministic seed.
 
 ### Note
 
-`--recreate` drops tables, which also drops their grants. The script re-applies
-the app service principal's grants on every run when `--app-sp-client-id` is
-passed, so the two stay in step.
+`--recreate` drops the tables and, with them, their explicit grants. In practice
+the app keeps its access on this instance: the first run's
+`ALTER DEFAULT PRIVILEGES` persists in `pg_default_acl`, so tables recreated by
+the same operator receive the app role's DML automatically (verified live,
+2026-09-04). A fresh database, or a different operator, has no such row. The
+script therefore warns when `--recreate` runs without `--app-sp-client-id` and
+always prints the current grants in its report, so the state is never silent.
+
+---
+
+## ADR-003 — Pin `booking_seats` to its header's showtime; tie `cancelled_at` to `status`
+
+**Date:** 2026-09-04 · **Phase:** 2 (post-review) · **Status:** accepted · **Changes:** CLAUDE.md §2, §4.3; docs/DATA_MODEL.md
+
+### Context
+
+ADR-001 closed the seat ↔ auditorium path but left the booking ↔ showtime path
+open. `booking_seats` referenced `bookings` on `booking_id` alone, so a seat row
+could carry a different `showtime_id` than its own header. Two showtimes in the
+same auditorium satisfy both ADR-001 composite FKs, and a code review proved the
+gap live: Postgres accepted the mismatched row.
+
+This was found by a code review one session after the ADR that was specifically
+about closing this class of gap. Logged as such in `AI_USAGE_LOG.md`.
+
+A second, smaller gap in the same table: `status` and `cancelled_at` were
+independent, so `CANCELLED` without a timestamp, or a timestamp on a `CONFIRMED`
+booking, were both representable.
+
+### Decision
+
+The same shape as ADR-001, one relationship over:
+
+```sql
+-- bookings
+CONSTRAINT uq_bookings_id_showtime UNIQUE (booking_id, showtime_id)
+
+-- booking_seats (replaces the plain booking_id FK)
+CONSTRAINT fk_booking_seats_booking
+    FOREIGN KEY (booking_id, showtime_id) REFERENCES bookings (booking_id, showtime_id)
+    ON DELETE CASCADE
+```
+
+and, on `bookings`:
+
+```sql
+CONSTRAINT ck_bookings_cancelled_at
+    CHECK ((status = 'CANCELLED') = (cancelled_at IS NOT NULL))
+```
+
+The CHECK is taken now although cancellation is a stretch feature, because the
+FK change already forces a `--recreate`; deferring it would cost a second
+rebuild later.
+
+### Consequences
+
+- `booking_seats` is fully pinned: its seat, its showtime and its header are
+  forced into agreement by the schema, not by the service.
+- A header's `showtime_id` is immutable once it has seats (no `ON UPDATE
+  CASCADE`). Moving a booking to another showtime is a new booking, which is
+  the intended model.
+- Cancellation, when built, must set `status` and `cancelled_at` in one
+  `UPDATE`, and the seed script must never touch app-made headers (its total
+  recompute is now scoped to seeded ids for exactly this reason).
+- One more redundant unique index on `bookings` and one CHECK. Negligible.
+- Applied with `seed_lakebase.py --recreate`, per ADR-002.
+
+### Alternatives considered
+
+- **Drop `showtime_id` from `booking_seats` and derive it through the header.**
+  Impossible: the double-booking constraint `UNIQUE (showtime_id, seat_id)`
+  needs the column on the seat row.
+- **Leave it to the booking service**, whose `INSERT … SELECT` uses the same
+  showtime parameter for header and seats. Correct today, but application
+  logic, which is what this design argues against.

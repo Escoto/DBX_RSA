@@ -1,0 +1,8 @@
+{
+  "name": "movies_app",
+  "private": true,
+  "description": "Root package.json exists only so Databricks Apps runs the build script at deploy time (frontend -> frontend/dist). No runtime Node dependencies.",
+  "scripts": {
+    "build": "cd frontend && npm ci --include=dev && npm run build"
+  }
+}

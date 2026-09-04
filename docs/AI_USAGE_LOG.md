@@ -115,3 +115,29 @@ window and document the re-run behaviour instead of pinning dates; run the
 
 **Rough split for the addendum:** ~90% AI (review, counter-review, edits),
 ~10% human (the four-of-five call, the rolling-window call, execution).
+
+---
+
+## Deploy flow — build the SPA on the platform (2026-09-04)
+
+**Human input:** the user brought a pattern from another working project: a
+root `package.json` plus an `app.yaml` command that ran `pip install`, `npm run
+build` and `uvicorn` in a shell at startup, and asked for a review.
+
+**What AI did:** instead of judging the pattern from memory, it read the
+Databricks Apps deployment, dependencies, runtime and system-environment docs
+and found that a root `package.json` already makes the platform run `npm
+install`, `pip install` and `npm run build` before the `app.yaml` command. The
+proposal was therefore doing the platform's work a second time at every process
+start, and hardcoded the port. AI recommended keeping the user's root
+`package.json` (the part that mattered) and reverting the command to `python -m
+backend.serve`, plus `npm ci --include=dev` for the devDependency caveat in the
+docs. Written up as ADR-004, with CLAUDE.md, README and `databricks.yml`
+updated to match.
+
+**Outcome:** the user's instinct (stop building on the laptop) was right and
+removed a real two-shell failure mode; the docs check moved the build from
+startup to deploy time, which keeps the fast-startup argument from CLAUDE.md §3.
+
+**Rough split:** ~50/50. The human supplied the working pattern and the
+direction; AI supplied the docs check and the corrected shape.

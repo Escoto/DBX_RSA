@@ -73,7 +73,9 @@ No login and no payment: both are explicitly out of scope for the exercise.
                      └──────────────────────────────┘
 
 Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registration, analytics catalog + schema,
-                                                 SQL warehouse, app, analytics job
+                                                 SQL warehouse, app, analytics job; uploads the app source
+              databricks bundle run movies_app → app deployment on the Apps runtime: npm install, pip install,
+                                                 npm run build (Vue → frontend/dist), then python -m backend.serve
               python src/seed/seed_lakebase.py → Postgres schema, tables, seed data, grants for the app
 ```
 
@@ -163,6 +165,7 @@ dbx-movies-app/
     ├── src/analytics/gold.sql      gold tables from the Lakebase catalog
     └── movies_app/                 app source (source_code_path)
         ├── app.yaml                command + env for Databricks Apps
+        ├── package.json            build script that Databricks Apps runs at deploy → frontend/dist
         ├── requirements.txt
         ├── backend/                FastAPI
         ├── frontend/               Vue 3 + Vite + TS  →  frontend/dist
@@ -179,8 +182,9 @@ dbx-movies-app/
   `catalogs` resource requires) with a profile named `movies` for the target
   workspace (`databricks configure --host https://dbc-66830d2c-97a4.cloud.databricks.com --profile movies --token`,
   or OAuth via `databricks auth login`); the `dev` target references that profile
-- Node 20+ and Python 3.11+ locally (to build the frontend, seed the database,
-  and run locally; the app itself runs on the Databricks Apps runtime)
+- Python 3.11+ locally to seed the database and run the backend; Node 20+ only
+  for local frontend development. The frontend is built on the Databricks Apps
+  runtime at deploy time, so no local build is needed to deploy
 - Permission to create a Lakebase instance, catalogs and a SQL warehouse in the
   workspace
 
@@ -188,9 +192,9 @@ dbx-movies-app/
 
 ```bash
 cd movies_app_bundle
-(cd movies_app/frontend && npm install && npm run build)   # produces frontend/dist
 databricks bundle validate -t dev
-databricks bundle deploy   -t dev                           # Lakebase, UC registration, catalog, schema, warehouse, app, job
+databricks bundle deploy   -t dev                           # Lakebase, UC registration, catalog, schema, warehouse, app, job; uploads the app source
+databricks bundle run movies_app -t dev                     # app deployment: npm install, pip install, npm run build (frontend → dist), start
 databricks apps get movies-app -p movies                    # note url + service_principal_client_id
 pip install "psycopg[binary]" databricks-sdk
 DATABRICKS_CONFIG_PROFILE=movies python src/seed/seed_lakebase.py --app-sp-client-id <client-id>

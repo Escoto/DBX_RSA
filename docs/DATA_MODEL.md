@@ -93,18 +93,24 @@ single transaction.
 |---|---|---|
 | **A seat is sold at most once per showtime** | `UNIQUE (showtime_id, seat_id)` — `uq_booking_seats_showtime_seat` | `booking_seats` |
 | **A booked seat is physically in the room the showtime plays in** | composite FKs `(seat_id, auditorium_id) → seats` and `(showtime_id, auditorium_id) → showtimes` | `booking_seats` |
+| **A seat row is on the same showtime as its booking header** | composite FK `(booking_id, showtime_id) → bookings` — `fk_booking_seats_booking` (ADR-003) | `booking_seats` |
 | Seat positions are unique within an auditorium | `UNIQUE (auditorium_id, row_label, seat_number)` | `seats` |
 | Seat types are a closed set | `CHECK seat_type IN ('standard','premium','accessible')` | `seats` |
 | Booking status is a closed set | `CHECK status IN ('CONFIRMED','CANCELLED')` | `bookings` |
+| A booking is cancelled iff it has a cancellation time | `CHECK ((status = 'CANCELLED') = (cancelled_at IS NOT NULL))` | `bookings` |
 | Prices and totals are non-negative | `CHECK … >= 0` | `showtimes`, `bookings`, `booking_seats` |
 | Cancelling a booking releases its seats | `ON DELETE CASCADE` from `bookings` | `booking_seats` |
-| Every FK target exists | 9 foreign keys | all |
+| Every FK target exists | 8 foreign keys, 3 of them composite | all |
 
 Verified against the live instance: a duplicate `(showtime_id, seat_id)` insert
 raises `uq_booking_seats_showtime_seat`; a seat from another auditorium raises
 `fk_booking_seats_seat` or `fk_booking_seats_showtime` depending on which side
 the mismatched `auditorium_id` breaks; the same seat in a *different* showtime
 is accepted, which is the case a naive `UNIQUE (seat_id)` would wrongly reject.
+ADR-003 was added after that check: a seat row that names a different showtime
+than its header now violates `fk_booking_seats_booking`. The seed script's
+report prints the constraint inventory from `pg_constraint` on every run, so
+the check is repeatable.
 
 ### Why `auditorium_id` is denormalised into `booking_seats`
 
@@ -119,12 +125,24 @@ constraints are the backstop that holds even if that check is wrong. Defence in
 depth: the friendly error comes from the app, the guarantee comes from the
 schema.
 
+### Why the FK to `bookings` carries `showtime_id` too
+
+The same reasoning, one relationship over. `booking_seats` reaches a showtime
+two ways as well — directly, and through its header — and a plain `booking_id`
+FK let those disagree: two showtimes in the same room satisfy both composite
+FKs above while the header points at a third. Referencing
+`bookings (booking_id, showtime_id)` instead pins the seat row to its header's
+showtime, so the table is now fully determined: seat, showtime and header must
+agree. See ADR-003.
+
 ### Why the unique constraint is on `booking_seats`, not a partial index
 
-Cancellation deletes the `booking_seats` rows and marks the header `CANCELLED`.
-The seats are freed by the delete, so the unique constraint never has to be
-aware of booking status — no `WHERE status = 'CONFIRMED'` partial index, no risk
-of a cancelled row blocking a resale. The header survives as the audit trail.
+Cancellation deletes the `booking_seats` rows and marks the header `CANCELLED`,
+setting `cancelled_at` in the same statement (a CHECK requires the two to move
+together). The seats are freed by the delete, so the unique constraint never
+has to be aware of booking status — no `WHERE status = 'CONFIRMED'` partial
+index, no risk of a cancelled row blocking a resale. The header survives as the
+audit trail, with its `total_amount` intact.
 
 ---
 

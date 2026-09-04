@@ -50,6 +50,8 @@ async def health() -> dict:
 
 
 # SPA serving — must be registered after all API routes.
+# The mount at "/" happens at import time, so every app.include_router(...)
+# call (Phase 3) has to sit ABOVE this block or the SPA mount shadows it.
 # StaticFiles handles /assets, favicon, etc.; the 404 handler provides
 # history-mode fallback for vue-router paths.
 if DIST_DIR.is_dir():

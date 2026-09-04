@@ -180,3 +180,64 @@ rebuild later.
 - **Leave it to the booking service**, whose `INSERT … SELECT` uses the same
   showtime parameter for header and seats. Correct today, but application
   logic, which is what this design argues against.
+
+---
+
+## ADR-004 — Build the SPA on the Apps runtime at deploy time
+
+**Date:** 2026-09-04 · **Phase:** 2 → 5 · **Status:** accepted · **Changes:** CLAUDE.md §3, §4.6, §7, rule 9; `databricks.yml`; README
+
+### Context
+
+The baseline (CLAUDE.md §3) served a *prebuilt* SPA: `npm run build` on the
+developer machine, `frontend/dist` force-included in the bundle sync, FastAPI
+serving the static files. Two problems surfaced in practice:
+
+- Node exists only on the Windows side of this machine and the Databricks CLI
+  only in WSL, so every deploy was a two-shell ritual with a "forgot to
+  rebuild" failure mode (rule 9 existed only to police it).
+- The user proposed, from another working project, building at startup:
+  `app.yaml` running `pip install && npm run build && uvicorn`. That works, but
+  the Databricks Apps docs show it double-does the platform's own work.
+
+Per the Apps deployment docs, when a `package.json` is present at the app root
+every deployment runs, in order and before the `app.yaml` command:
+`npm install` (root), `pip install -r requirements.txt`, then `npm run build`
+if the root `package.json` defines a `build` script. The runtime ships Node.js
+22 next to Python 3.11.
+
+### Decision
+
+- Add a root `movies_app/package.json` with no dependencies and one script:
+  `"build": "cd frontend && npm ci --include=dev && npm run build"`. The
+  platform runs it at deploy time, producing `frontend/dist` on the container.
+- `app.yaml` command stays `["python", "-m", "backend.serve"]`: no shell, no
+  install, no build; the port comes from `DATABRICKS_APP_PORT` via `config.py`.
+- Drop the `sync.include` for `dist` from `databricks.yml`. `dist/` and
+  `node_modules/` remain gitignored and therefore unsynced.
+- `--include=dev` because every build tool in `frontend/package.json` is a
+  devDependency and the docs warn dev dependencies are skipped in production
+  mode. `npm ci` because the lockfile is committed.
+
+### Consequences
+
+- Deploying is WSL-only: `bundle deploy` then `bundle run movies_app`. No local
+  build step; a stale `dist` cannot reach the platform.
+- Startup stays fast (the §3 argument for a live demo holds): Node runs at
+  deploy time, never at process start or restart.
+- A type error or build failure fails the *deployment*, visibly, rather than
+  the running app.
+- Deployments take longer (an `npm ci` of the Vite toolchain plus the build,
+  roughly a minute on 2 vCPUs). Acceptable.
+- Local `npm run build` and `/build-check` remain useful as a pre-deploy check
+  and now mirror exactly what the platform runs.
+
+### Alternatives considered
+
+- **Build at process start in the `app.yaml` command** (the proposal). Works,
+  but rebuilds on every start and restart, adds a PyPI and npm network
+  dependency to startup, and hardcodes the port. Rejected.
+- **Keep the local prebuilt `dist`** (the baseline). Fast and simple on a
+  single-OS machine; on this one it is the two-shell ritual. Rejected.
+- **A bundle `artifacts` build step.** Runs on the deploying machine at
+  `bundle deploy`, which here is WSL without Node. Rejected.

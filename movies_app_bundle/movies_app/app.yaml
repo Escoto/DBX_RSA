@@ -1,9 +1,14 @@
+# Databricks Apps runtime config. At every deployment the platform runs, in this
+# order and BEFORE this command: `npm install` (root package.json), `pip install
+# -r requirements.txt`, then `npm run build` (root package.json), which builds the
+# Vue SPA into frontend/dist. So the command only has to start the server; it
+# reads DATABRICKS_APP_PORT in backend/config.py. See docs/DECISIONS.md ADR-004.
 command: ["python", "-m", "backend.serve"]
 env:
   - name: LAKEBASE_INSTANCE
-    value: movies-app-dev
+    value: movies-app-dev        # must equal var.lakebase_instance_name
   - name: LAKEBASE_DATABASE
-    value: movies
+    value: movies                # must equal var.lakebase_database
   - name: LAKEBASE_SCHEMA
     value: movies
   - name: DATABRICKS_WAREHOUSE_ID

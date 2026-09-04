@@ -71,7 +71,13 @@ idempotent, with `--reset`, `--recreate` and `--app-sp-client-id`) are applied t
 `bookings` has a status/`cancelled_at` CHECK, the seed's total recompute is
 scoped to seeded ids, and its report prints the constraint inventory and the
 app role's grants. Those schema changes reach the live instance only through
-`seed_lakebase.py --recreate --app-sp-client-id …` (pending the user's run). Verified live: 8/3/5/600/70/54/128 rows; a duplicate
+`seed_lakebase.py --recreate --app-sp-client-id …` (pending the user's run).
+
+**Deploy flow changed (ADR-004, 2026-09-04).** The SPA is now built on the
+Apps runtime at deploy time by a root `movies_app/package.json` build script;
+`app.yaml` only starts the server and `databricks.yml` no longer syncs `dist`.
+Pushing code is `bundle deploy` then `bundle run movies_app`. Not yet exercised
+on the platform; the first Phase 5 deployment verifies it. Verified live: 8/3/5/600/70/54/128 rows; a duplicate
 `(showtime_id, seat_id)` raises `uq_booking_seats_showtime_seat`; a
 cross-auditorium seat raises one of the composite FKs; the app SP holds
 USAGE + full DML on all 7 tables; all 7 tables are queryable through Unity
@@ -115,7 +121,7 @@ the remaining docs.
 |-------|----------|-----------------|
 | Backend language | **Python 3.11, FastAPI** | Databricks-native SDK support, Apps docs use Python, user has FastAPI experience |
 | Frontend | **Vue 3 + Vite + TypeScript**, vue-router, no state library | TS gives typed API contracts; small enough to not need Pinia |
-| Serving | FastAPI serves `/api/*` **and** the prebuilt SPA from `frontend/dist` | One process, one app, no Node at runtime → fast, predictable startup for a live demo |
+| Serving | FastAPI serves `/api/*` **and** the prebuilt SPA from `frontend/dist`; the SPA is built **on the Apps runtime at deploy time** by the root `package.json` build script (ADR-004) | One process, one app, no Node at runtime → fast, predictable startup for a live demo; no local build step, so a stale `dist` cannot reach the platform |
 | **System of record** | **Lakebase** (Databricks managed Postgres), instance `movies-app-dev`, database `movies`, schema `movies`, 7 tables with **enforced** PK/FK/UNIQUE/CHECK constraints | Assigned-seat booking is an OLTP problem: row locks, unique constraints, ms commits. Delta cannot enforce uniqueness or span tables in one transaction |
 | Governance | The Postgres database is **registered in Unity Catalog** as catalog `movies_app_dev` | The schema is browsable in Catalog Explorer and queryable from a SQL warehouse; meets "real schema in Unity Catalog" without ETL |
 | Analytics copy | Delta gold tables in `movies_analytics_dev.movies` (`occupancy_by_showtime`, `revenue_by_day`) built by a bundle job with a `sql_task` on the bundle's own warehouse `movies_analytics`, reading the Lakebase catalog | Shows the lakehouse side (Delta, jobs, warehouse) without putting OLTP on Delta. Infra exists; the job is Phase 6 |
@@ -152,7 +158,9 @@ Browser ──HTTPS──▶ Databricks App "movies-app" (FastAPI, port $DATABRI
                                                        │ analytics job (sql_task on movies_analytics)
                                                        ▼
                                           Delta: movies_analytics_dev.movies.occupancy_by_showtime, revenue_by_day
-Deploy-time:  databricks bundle deploy → instance, UC registration, catalog, schema, warehouse, app, job
+Deploy-time:  databricks bundle deploy → instance, UC registration, catalog, schema, warehouse, app, job (uploads movies_app/)
+              databricks bundle run movies_app → app deployment: npm install, pip install -r requirements.txt,
+                                                 npm run build (→ frontend/dist), then app.yaml command
               python src/seed/seed_lakebase.py → Postgres schema, tables, seed data, grants for the app SP
 ```
 
@@ -299,12 +307,27 @@ env:
     valueFrom: sql-warehouse
 ```
 
+`movies_app/package.json` (root, no dependencies; ADR-004):
+
+```json
+{ "name": "movies_app", "private": true,
+  "scripts": { "build": "cd frontend && npm ci --include=dev && npm run build" } }
+```
+
+A root `package.json` makes the Apps deployment run, in order and before the
+`app.yaml` command: `npm install` (root), `pip install -r requirements.txt`,
+`npm run build` (root). The build script builds the SPA into `frontend/dist` on
+the platform (Node 22, Python 3.11, 2 vCPU / 6 GB), so no local `npm run build`
+and no `sync.include` for `dist` are needed. `--include=dev` matters: every
+build tool in `frontend/package.json` is a devDependency, and the platform may
+install in production mode. A type error fails the deployment, not the running
+app.
+
 Databricks Apps injects `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`,
 `DATABRICKS_CLIENT_SECRET`, `DATABRICKS_APP_PORT`. With a `database` resource
 attached the platform is expected to also inject `PGHOST`, `PGPORT`,
 `PGDATABASE`, `PGUSER`, `PGSSLMODE`; treat them as optional and log which ones
-were present at startup. `requirements.txt` at the app root is installed at
-deploy (Python 3.11).
+were present at startup.
 
 `resources/analytics_job.yml` (Phase 6): one job, one `sql_task` with
 `warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}`
@@ -348,7 +371,7 @@ dbx-movies-app/
 │   ├── agents/databricks-engineer/AGENT.md
 │   └── commands/build-check.md
 └── movies_app_bundle/
-    ├── databricks.yml            engine: direct, variables, target, sync includes     (exists)
+    ├── databricks.yml            engine: direct, variables, target                   (exists)
     ├── resources/
     │   ├── lakebase.yml          database instance + UC registration                  (exists, deployed)
     │   ├── lakehouse.yml         analytics catalog + schema + SQL warehouse            (exists, deployed)
@@ -361,10 +384,11 @@ dbx-movies-app/
     │   │   └── seed_lakebase.py  runs ddl.sql, loads deterministic seed data, applies grants
     │   └── analytics/gold.sql    gold tables from the Lakebase catalog                 (Phase 6)
     └── movies_app/               ← App source_code_path (replaces movies_app_vue/)
-        ├── app.yaml
+        ├── app.yaml              command: python -m backend.serve; env
+        ├── package.json          build script only; run by the Apps deployment → frontend/dist (ADR-004)
         ├── requirements.txt      fastapi, uvicorn, psycopg[binary], databricks-sdk, pydantic
         ├── backend/              FastAPI (§4.2)
-        ├── frontend/             Vue 3 + Vite + TS; `npm run build` → frontend/dist
+        ├── frontend/             Vue 3 + Vite + TS; built on the platform at deploy, locally only for /build-check
         └── tests/                pytest: booking_service with a fake connection (unique-violation path)
 ```
 
@@ -407,7 +431,8 @@ Vite dev proxy `/api` → `http://localhost:8000`.
 Done-check: `/build-check` passes (vue-tsc + vite build); full click path works
 locally against the real Lakebase.
 
-**Phase 5 — Deploy + verify on platform (~30 min).** Build frontend, deploy,
+**Phase 5 — Deploy + verify on platform (~30 min).** `bundle deploy`, then
+`bundle run movies_app` (builds the SPA on the platform and restarts the app),
 open the app URL, complete a booking, show the row in Catalog Explorer
 (`movies_app_dev.movies.booking_seats`) and via the SQL editor on
 `movies_analytics`. Fill README placeholders (app URL). Write
@@ -442,7 +467,8 @@ Inside WSL, from `movies_app_bundle/`:
 # bundle
 databricks bundle validate -t dev
 databricks bundle summary  -t dev              # deployed resources + URLs
-databricks bundle deploy   -t dev
+databricks bundle deploy   -t dev              # uploads code + updates resources; does NOT restart the app
+databricks bundle run movies_app -t dev        # new app deployment: npm install, pip install, npm run build, start
 databricks bundle run analytics_job -t dev     # Phase 6
 
 # lakebase
@@ -481,9 +507,10 @@ DATABRICKS_CONFIG_FILE=//wsl.localhost/Ubuntu-24.04/home/raescoto/.databrickscfg
 export LAKEBASE_INSTANCE=movies-app-dev LAKEBASE_DATABASE=movies LAKEBASE_SCHEMA=movies
 cd movies_app_bundle/movies_app && pip install -r requirements.txt && python -m backend.serve
 
-# local dev (frontend) — Windows (Node 22)
+# local dev (frontend) — Windows (Node 22); the platform builds dist at deploy, so a local build is only a check
 cd movies_app_bundle/movies_app/frontend && npm install && npm run dev    # proxies /api → http://localhost:8000
-npm run build                                                             # → frontend/dist (must run before deploy)
+npm run build                                                             # type-check + build, same as /build-check
+cd movies_app_bundle/movies_app && npm run build                          # exactly what the Apps deployment runs
 ```
 
 Environment: Windows has Node v22.20.0, npm 10.9.3, Python 3.13.7; the Bash
@@ -509,8 +536,12 @@ Apps runtime is Python 3.11 — avoid 3.12+ only syntax.
    connection per request, enforced constraints) — the panel will read the code.
 8. **Update `docs/AI_USAGE_LOG.md` at the end of every phase**: what was
    generated, what the human changed or rejected, rough share of AI vs human.
-9. **Frontend must be built before deploy.** `frontend/dist` is synced by
-   explicit include; a stale or missing `dist` shows a blank app.
+9. **The frontend is built on the platform, not locally.** The root
+   `movies_app/package.json` build script runs during every app deployment,
+   before the `app.yaml` command (ADR-004). Pushing code is always two steps:
+   `bundle deploy` then `bundle run movies_app`. Never add `dist` to
+   `sync.include` and never put build steps in the `app.yaml` command; the
+   platform already runs `npm install`, `pip install` and `npm run build`.
 10. **Windows paths.** Use forward slashes in YAML/config; quote paths with
     spaces.
 

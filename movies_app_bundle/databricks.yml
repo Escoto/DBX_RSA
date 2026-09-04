@@ -33,10 +33,9 @@ variables:
     description: Databricks App name (lowercase letters, digits, hyphens)
     default: movies-app
 
-# dist/ is gitignored and bundles honor .gitignore; the prebuilt SPA must still be uploaded.
-sync:
-  include:
-    - movies_app/frontend/dist/**
+# No sync.include for movies_app/frontend/dist: the SPA is built on the Databricks
+# Apps runtime at deploy time by the root package.json build script (ADR-004).
+# dist/ and node_modules/ stay excluded through .gitignore, which bundles honor.
 
 targets:
   dev:

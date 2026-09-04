@@ -1,0 +1,11 @@
+command:
+  - /bin/sh
+  - -c
+  - npm install && npm run build && npm run start
+
+env:
+  - name: NODE_ENV
+    value: production
+
+  - name: VOLUME_BASE_PATH
+    valueFrom: GXP_PROJECTS_VOLUME

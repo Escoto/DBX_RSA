@@ -1,0 +1,46 @@
+bundle:
+  name: movies_app_bundle
+  engine: direct
+
+include:
+  - resources/*.yml
+
+variables:
+  # -- Lake Base --
+  lakebase_instance_name:
+    description: Lakebase instance name
+    default: movies-app-dev
+  lakebase_catalog:
+    description: Unity Catalog catalog name under which the Lakebase database is registered
+    default: movies_app_dev
+  lakebase_database:
+    description: Postgres database inside the instance that holds the app schema
+    default: movies
+  
+  # -- Lake House --
+  catalog_name:
+    description: Unity Catalog catalog for Delta analytics tables and the seed job outputs
+    default: movies_analytics_dev
+  schema_name:
+    description: Schema (in var.catalog) for Delta analytics tables
+    default: movies
+  warehouse_name:
+    description: Serverless SQL warehouse used for analytics queries
+    default: movies_analytics
+
+  # -- App --
+  app_name:
+    description: Databricks App name (lowercase letters, digits, hyphens)
+    default: movies-app
+
+# dist/ is gitignored and bundles honor .gitignore; the prebuilt SPA must still be uploaded.
+sync:
+  include:
+    - movies_app/frontend/dist/**
+
+targets:
+  dev:
+    default: true
+    workspace:
+      host: https://dbc-66830d2c-97a4.cloud.databricks.com
+      profile: movies

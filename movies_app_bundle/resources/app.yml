@@ -1,0 +1,18 @@
+resources:
+  apps:
+    movies_app:
+      name: ${var.app_name}
+      description: "Movie ticket booking prototype — FastAPI + Vue on Lakebase"
+      source_code_path: ../movies_app
+      resources:
+        - name: lakebase
+          description: Lakebase OLTP database for the booking app
+          database:
+            instance_name: ${resources.database_instances.movies_db.name}
+            database_name: ${var.lakebase_database}
+            permission: CAN_CONNECT_AND_CREATE
+        - name: sql-warehouse
+          description: Serverless SQL warehouse for analytics queries
+          sql_warehouse:
+            id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
+            permission: CAN_USE

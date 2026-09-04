@@ -1,0 +1,10 @@
+command: ["python", "-m", "backend.serve"]
+env:
+  - name: LAKEBASE_INSTANCE
+    value: movies-app-dev
+  - name: LAKEBASE_DATABASE
+    value: movies
+  - name: LAKEBASE_SCHEMA
+    value: movies
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse

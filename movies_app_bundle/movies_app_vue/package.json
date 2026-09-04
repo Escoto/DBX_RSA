@@ -1,0 +1,17 @@
+{
+  "name": "app-vue",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "serve dist --listen tcp://0.0.0.0:$DATABRICKS_APP_PORT --single"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "vite": "^6.2.0",
+    "serve": "^14.2.4"
+  }
+}

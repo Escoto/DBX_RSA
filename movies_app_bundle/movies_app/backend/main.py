@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .config import settings
+from .routers import catalog, seats, bookings
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,11 @@ async def health() -> dict:
     return result
 
 
+app.include_router(catalog.router)
+app.include_router(seats.router)
+app.include_router(bookings.router)
+
 # SPA serving — must be registered after all API routes.
-# The mount at "/" happens at import time, so every app.include_router(...)
-# call (Phase 3) has to sit ABOVE this block or the SPA mount shadows it.
 # StaticFiles handles /assets, favicon, etc.; the 404 handler provides
 # history-mode fallback for vue-router paths.
 if DIST_DIR.is_dir():

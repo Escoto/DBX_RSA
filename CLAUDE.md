@@ -89,9 +89,22 @@ path), the `databricks-engineer` agent and the `/build-check` command. The old
 placeholder SPA `movies_app_vue/` was deleted on 2026-09-04 (`tokens.css` had
 already been carried into `movies_app/frontend/`).
 
-**Not built yet:** the real backend routers and booking service (Phase 3), the
-frontend routes and seat map (Phase 4), the analytics job (Phase 6), tests, and
-the remaining docs.
+**Phase 3 complete (2026-09-05).** `backend/models.py` (Pydantic v2),
+`backend/routers/` (`catalog.py`, `seats.py`, `bookings.py`),
+`backend/services/booking_service.py` (the §4.4 transaction), and
+`tests/test_booking_service.py` (6 tests: happy path, unique-violation → 409,
+showtime not found, past showtime, invalid seats, duplicate seat ids).
+`requirements-dev.txt` for test dependencies. All routers registered in
+`main.py` above the SPA mount. Verified against the live Lakebase: 8 movies,
+3 theaters, 60 future showtimes; seat map for `st-d1-s0-aud-01` returns 120
+seats (115 available, 5 booked); POST books `aud-01-A01` + `aud-01-A02` →
+201; second POST → 409 with `taken_seat_ids`; GET booking returns the header
+with seats. Booking id `6c5179dc-997b-4ea8-b966-c34668386b86` visible in
+`movies_app_dev.movies.booking_seats`.
+
+**Not built yet:** the frontend routes and seat map (Phase 4), the analytics
+job (Phase 6), and the remaining docs (`ARCHITECTURE.md`,
+`SCALE_TO_MILLIONS.md`, `DEMO_SCRIPT.md`).
 
 **Hazards (still live)**
 

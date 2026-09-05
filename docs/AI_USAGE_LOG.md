@@ -141,3 +141,66 @@ startup to deploy time, which keeps the fast-startup argument from CLAUDE.md §3
 
 **Rough split:** ~50/50. The human supplied the working pattern and the
 direction; AI supplied the docs check and the corrected shape.
+
+---
+
+## Phase 3 — Backend routers, booking service, and tests (2026-09-05)
+
+**What AI generated (~95% of Phase 3 code):**
+
+- `backend/models.py` — Pydantic v2 request/response models for the full
+  §4.5 API contract: `Movie`, `Theater`, `Showtime` (with joined names),
+  `SeatMapResponse` (grouped by row, each seat with price by type and
+  booked/available status), `CreateBookingRequest` (with 1–8 seat validation),
+  `Booking` (with nested `BookingSeat` list).
+- `backend/routers/catalog.py` — `GET /api/movies`, `GET /api/movies/{id}`,
+  `GET /api/theaters`, `GET /api/showtimes` with `movie_id`/`theater_id`/`date`
+  filters and joined movie, theater and auditorium names; past showtimes
+  excluded by default.
+- `backend/routers/seats.py` — `GET /api/showtimes/{id}/seats`: the §4.3 LEFT
+  JOIN seat map, grouped by row, priced by seat type from the showtime.
+- `backend/routers/bookings.py` — `POST /api/bookings` (delegates to the
+  service, catches `ValidationError` → 422 and `ConflictError` → 409 with
+  `taken_seat_ids`), `GET /api/bookings/{id}` (header + seats).
+- `backend/services/booking_service.py` — the §4.4 transaction exactly:
+  validate (showtime exists and is future, 1–8 unique seats in the right
+  auditorium), one transaction (INSERT header, INSERT…SELECT seats with pricing,
+  rowcount guard, UPDATE total), `UniqueViolation` → rollback → re-query taken
+  seats → `ConflictError`. All SQL parameterised with `%s`.
+- `tests/test_booking_service.py` — 6 tests against a fake connection/cursor:
+  happy path, unique-violation → `ConflictError` with the right seat ids,
+  showtime not found, past showtime, invalid seats, duplicate seat ids.
+- `requirements-dev.txt` — includes `requirements.txt` plus `pytest`.
+- Updated `backend/main.py` to register the three routers above the SPA mount.
+- Updated `CLAUDE.md` §2 with Phase 3 state.
+- This log entry.
+
+**What the human provided:**
+
+- `CLAUDE.md` — the full architecture spec (§4.2–§4.5) that defined the router
+  layout, API contract, booking write path, seat map query, and the comment
+  policy for assumptions.
+- The working dev environment: WSL Python 3.11 venv, Makefile, Lakebase
+  credentials and seed data already in place.
+- The done-check criteria: which showtime and what responses to expect.
+- Review and commit of all generated files.
+
+**What was changed or rejected:** TBD (human to fill in after review).
+
+**Verification against the live Lakebase (2026-09-05):**
+
+- `GET /api/movies` → 8 movies
+- `GET /api/theaters` → 3 theaters
+- `GET /api/showtimes` → 60 future showtimes (past excluded)
+- `GET /api/showtimes/st-d1-s0-aud-01/seats` → 120 seats (115 available,
+  5 booked by the seed)
+- `POST /api/bookings` (seats `aud-01-A01`, `aud-01-A02`) → 201, booking id
+  `6c5179dc-997b-4ea8-b966-c34668386b86`, total $24.00
+- `POST /api/bookings` (same seats) → 409,
+  `taken_seat_ids: ["aud-01-A01", "aud-01-A02"]`
+- `GET /api/bookings/{id}` → header + 2 seats
+- Seat map re-fetch confirms both seats now booked
+- `pytest` → 6/6 passed
+
+**Rough split:** ~90% AI (code, tests, verification), ~10% human (spec,
+environment, review).

@@ -102,9 +102,28 @@ seats (115 available, 5 booked); POST books `aud-01-A01` + `aud-01-A02` →
 with seats. Booking id `6c5179dc-997b-4ea8-b966-c34668386b86` visible in
 `movies_app_dev.movies.booking_seats`.
 
-**Not built yet:** the frontend routes and seat map (Phase 4), the analytics
-job (Phase 6), and the remaining docs (`ARCHITECTURE.md`,
-`SCALE_TO_MILLIONS.md`, `DEMO_SCRIPT.md`).
+**Phase 4 complete (2026-09-05).** `frontend/src/services/api.ts` (typed
+client mirroring `backend/models.py`, `ApiError` with `status` and
+`takenSeatIds`), `router.ts` (the four §4.5 routes + catch-all redirect),
+`composables/useAsync.ts`, `utils/format.ts` (USD, UTC-pinned dates),
+`components/SeatMap.vue` (rows of buttons, booked disabled, selected /
+just-taken highlighted, legend, max 8), `PosterImage.vue` (falls back to a
+gradient when the picsum URL fails), `StateBlock.vue` (loading / error +
+retry), and views `MoviesView`, `MovieView` (theater chips + showtimes grouped
+by UTC day), `ShowtimeView` (seat map + running total + customer form; a 409
+re-fetches the map, drops the lost seats from the selection and marks them
+red), `BookingView` (confirmation; fetches the seat-map endpoint for the
+movie/room/time header because there is no `GET /api/showtimes/{id}`).
+`vue-tsc` and `vite build` pass. Verified locally against the live Lakebase
+through `python -m backend.serve` on :8000 (so the SPA history fallback was
+exercised too): grid → movie → theater filter → seat map → rival books E5 via
+curl → UI POST returns 409, E5 turns red, E6 stays selected → second POST
+books E6 → confirmation `cd02dc6d-9658-41cd-9080-825183317f39`; the seat map
+then shows E5 and E6 booked; the mobile layout stacks the side panel.
+
+**Not built yet:** Phase 5 (deploy + verify on platform, README placeholders,
+`DEMO_SCRIPT.md`), the analytics job (Phase 6), and the remaining docs
+(`ARCHITECTURE.md`, `SCALE_TO_MILLIONS.md`).
 
 **Hazards (still live)**
 

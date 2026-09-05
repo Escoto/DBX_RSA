@@ -204,3 +204,60 @@ direction; AI supplied the docs check and the corrected shape.
 
 **Rough split:** ~90% AI (code, tests, verification), ~10% human (spec,
 environment, review).
+
+## Phase 4 — Frontend routes and seat map (2026-09-05)
+
+**What AI generated (~95% of Phase 4 code):**
+
+- `frontend/src/services/api.ts` — typed client mirroring `backend/models.py`
+  one-to-one; `ApiError` carries the HTTP status, a human-readable `detail`
+  (string or flattened pydantic error list) and `takenSeatIds` for the 409.
+- `frontend/src/router.ts` — the four §4.5 routes with `props: true`, a
+  catch-all redirect to `/`, scroll-to-top.
+- `frontend/src/composables/useAsync.ts` — loading/error/data state per
+  request; no state library, as decided in §3.
+- `frontend/src/utils/format.ts` — USD and UTC-pinned date/time formatters,
+  `dateKey` for grouping showtimes by UTC day, `seatLabel`.
+- `frontend/src/components/SeatMap.vue` — presentational seat grid (screen
+  arc, row labels both sides, legend). Booked seats disabled, selected and
+  "just taken" seats highlighted, premium/accessible styled by type, a max-seat
+  cap that disables the rest of the map at 8.
+- `frontend/src/components/PosterImage.vue` — poster with an `@error`
+  fallback to a gradient + initial (picsum was unreachable from the sandboxed
+  browser during verification).
+- `frontend/src/components/StateBlock.vue` — shared loading / error + retry.
+- Views: `MoviesView` (grid), `MovieView` (theater chips filter client-side,
+  showtimes grouped by day), `ShowtimeView` (seat map + running total +
+  customer form; a 409 re-fetches the map, drops the lost seats from the
+  selection, marks them red and explains), `BookingView` (confirmation with
+  movie/room/time pulled from the seat-map endpoint, seats and total, links
+  back to the seat map and the grid).
+- `App.vue` header with a home link; `HomeView.vue` placeholder deleted.
+- `CLAUDE.md` §2 Phase 4 state and this log entry.
+
+**What the human provided:**
+
+- `CLAUDE.md` §4.5 (routes, seat-map behaviour including the 409 re-fetch),
+  §3 (USD/UTC, no Pinia, max 8 seats) and the existing `tokens.css`.
+- The Phase 3 backend and live Lakebase to click against.
+- Review and commit of all generated files.
+
+**What was changed or rejected:** TBD (human to fill in after review).
+
+**Verification (2026-09-05, local backend on :8000 serving `dist`, live
+Lakebase):**
+
+- `vue-tsc --noEmit` and `vite build` pass (`/build-check` equivalent).
+- Grid → "A Year of Tuesdays" → theater filter "Slalom Cinema Downtown" narrows
+  8 showtimes to 3 → seat map for `st-d2-s0-aud-02` (120 seats, premium rows
+  E–G, accessible seats at the ends of row A).
+- Selected E5 + E6, total $34.00. A rival `curl` booked `aud-02-E05` first.
+  UI POST → 409: E5 rendered red as "just taken", the map refreshed, E6 stayed
+  selected, total $17.00, message "Some seats are already booked: E5".
+- Second POST → 201, routed to `/bookings/cd02dc6d-9658-41cd-9080-825183317f39`
+  showing movie, when, room, customer, seat E6, total $17.00.
+- Direct navigation to `/showtimes/st-d2-s0-aud-02` (history fallback) shows
+  E5 and E6 booked. Mobile preset stacks the side panel under the map.
+
+**Rough split:** ~90% AI (code, styling, verification), ~10% human (spec,
+design tokens, review).

@@ -5,11 +5,13 @@ from fastapi import APIRouter, HTTPException
 from .. import db
 from ..models import SeatDetail, SeatMapResponse, SeatMapShowtime, SeatRow
 
+# Handlers are sync `def` on purpose: psycopg blocks, so FastAPI runs them in
+# its threadpool and requests can overlap. See backend/db.py for the contract.
 router = APIRouter(prefix="/api", tags=["seats"])
 
 
 @router.get("/showtimes/{showtime_id}/seats", response_model=SeatMapResponse)
-async def get_seat_map(showtime_id: str) -> SeatMapResponse:
+def get_seat_map(showtime_id: str) -> SeatMapResponse:
     st_rows = db.query(
         "SELECT st.showtime_id, st.auditorium_id, st.starts_at, "
         "st.price_standard, st.price_premium, "

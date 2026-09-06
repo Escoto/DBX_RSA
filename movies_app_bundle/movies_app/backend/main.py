@@ -10,17 +10,15 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .config import settings
-from .routers import catalog, seats, bookings
+from .routers import bookings, catalog, seats
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Movies Booking API")
-
-DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+from contextlib import asynccontextmanager
 
 
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     settings.log_platform_vars()
     logger.info(
         "instance=%s database=%s schema=%s dist_exists=%s",
@@ -38,11 +36,36 @@ async def _startup() -> None:
         os.environ.get("DATABRICKS_CLIENT_ID", "(not set)"),
     )
 
+    if settings.pg_pool_enabled:
+        try:
+            pool = db.get_pool()
+            pool.open(wait=False)
+            logger.info("Connection pool opened (wait=False)")
+        except Exception as exc:
+            logger.error("Failed to open connection pool on startup: %s", exc)
+
+    yield
+
+    if settings.pg_pool_enabled:
+        try:
+            pool = db.get_pool()
+            pool.close()
+            logger.info("Connection pool closed")
+        except Exception as exc:
+            logger.error("Failed to close connection pool: %s", exc)
+
+
+app = FastAPI(title="Movies Booking API", lifespan=lifespan)
+
+DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
 
 @app.exception_handler(Exception)
 async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:
     if request.url.path.startswith("/api"):
-        logger.error("Unhandled %s on %s: %s", type(exc).__name__, request.url.path, exc)
+        logger.error(
+            "Unhandled %s on %s: %s", type(exc).__name__, request.url.path, exc
+        )
         # Prototype: the error class and message go into `detail` so the SPA's
         # error box shows the real cause. Production would log the detail and
         # return an opaque message with a correlation id.
@@ -101,7 +124,9 @@ async def health() -> dict:
     try:
         token = db._get_token()
         result["token_ok"] = bool(token)
-        result["token_source"] = "PGPASSWORD" if settings.pgpassword else "generate_database_credential"
+        result["token_source"] = (
+            "PGPASSWORD" if settings.pgpassword else "generate_database_credential"
+        )
     except Exception as exc:
         result["status"] = "degraded"
         result["token_error"] = f"{type(exc).__name__}: {exc}"
@@ -109,7 +134,13 @@ async def health() -> dict:
 
     # Step 4: connect and run SELECT 1
     try:
-        conn = db.get_connection()
+        if settings.pg_pool_enabled:
+            # When pool is enabled, use a temporary direct connection just to verify
+            # connectivity for the health check without affecting pool stats
+            conn = db.get_connection()
+        else:
+            conn = db.get_connection()
+
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
@@ -120,6 +151,20 @@ async def health() -> dict:
         result["status"] = "degraded"
         result["db"] = f"error: {type(exc).__name__}: {exc}"
         logger.warning("Health check DB error: %s", exc)
+
+    if settings.pg_pool_enabled:
+        try:
+            pool = db.get_pool()
+            stats = pool.get_stats()
+            result["pool_stats"] = {
+                "pool_size": stats.get("pool_size", 0),
+                "pool_available": stats.get("pool_available", 0),
+                "requests_waiting": stats.get("requests_waiting", 0),
+                "connections_num": stats.get("connections_num", 0),
+            }
+        except Exception as exc:
+            result["pool_stats"] = f"error: {type(exc).__name__}: {exc}"
+
     return result
 
 
@@ -135,7 +180,7 @@ if DIST_DIR.is_dir():
 
 
 @app.exception_handler(404)
-async def _spa_fallback(request, exc):  # noqa: ANN001
+async def _spa_fallback(request, exc):
     if not request.url.path.startswith("/api") and DIST_DIR.is_dir():
         index = DIST_DIR / "index.html"
         if index.is_file():

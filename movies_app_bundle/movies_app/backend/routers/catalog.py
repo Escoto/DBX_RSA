@@ -15,9 +15,7 @@ async def list_movies() -> list[dict]:
 
 @router.get("/movies/{movie_id}", response_model=Movie)
 async def get_movie(movie_id: str) -> dict:
-    rows = db.query(
-        "SELECT * FROM movies WHERE movie_id = %s", (movie_id,)
-    )
+    rows = db.query("SELECT * FROM movies WHERE movie_id = %s", (movie_id,))
     if not rows:
         raise HTTPException(404, "Movie not found")
     return rows[0]

@@ -9,11 +9,13 @@ from .. import db
 from ..models import Booking, CreateBookingRequest
 from ..services import booking_service
 
+# Handlers are sync `def` on purpose: psycopg blocks, so FastAPI runs them in
+# its threadpool and requests can overlap. See backend/db.py for the contract.
 router = APIRouter(prefix="/api", tags=["bookings"])
 
 
 @router.post("/bookings", response_model=Booking, status_code=201)
-async def create_booking(body: CreateBookingRequest):
+def create_booking(body: CreateBookingRequest):
     try:
         return booking_service.create_booking(
             showtime_id=body.showtime_id,
@@ -34,7 +36,7 @@ async def create_booking(body: CreateBookingRequest):
 
 
 @router.get("/bookings/{booking_id}", response_model=Booking)
-async def get_booking(booking_id: UUID):
+def get_booking(booking_id: UUID):
     rows = db.query(
         "SELECT booking_id, showtime_id, customer_name, customer_email, "
         "status, total_amount, created_at, cancelled_at "

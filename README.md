@@ -92,6 +92,52 @@ Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registr
 | App → DB auth | App's own service principal + short-lived OAuth token via the Databricks SDK | Native Postgres passwords; disabled on the instance |
 | Infrastructure as code | Databricks Asset Bundles, direct engine, one `dev` target: database, catalogs, schema, warehouse, app and job in one bundle | Manual UI setup; bundles make every asset the panel sees reproducible from the repo |
 
+### One request, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Browser
+    participant L as Event loop (uvicorn, 1 thread)
+    participant T as Worker thread (1 of 40)
+    participant P as psycopg pool (min 2 / max 10)
+    participant PG as Lakebase Postgres
+
+    U->>L: GET /api/movies
+    activate L
+    Note over L: parse HTTP, match route.<br/>endpoint is def, not async def
+    L->>T: run_sync(list_movies)
+    deactivate L
+    Note over L: loop is free again —<br/>other users' requests keep arriving
+    activate T
+    T->>P: getconn, timeout 10s
+    alt idle connection available
+        P-->>T: reuse it, no handshake
+    else none free and size below max
+        P->>PG: mint OAuth token, TCP + TLS + auth
+        PG-->>P: new connection
+    end
+    T->>PG: SELECT
+    Note over T,PG: only THIS thread blocks.<br/>the loop and 39 other threads run on
+    PG-->>T: rows
+    T->>P: putconn, commit and check expiry
+    T-->>L: return value
+    deactivate T
+    activate L
+    Note over L: pydantic validation, JSON encoding
+    L-->>U: 200 with movie list
+    deactivate L
+```
+
+The API handlers are deliberately sync `def`, not `async def`. psycopg is a
+blocking driver, so FastAPI runs them in its threadpool and the event loop stays
+free to accept other requests; an `async def` handler would hold the loop for the
+whole database round trip and serialise every user behind it — which would also
+cap the pool at one connection in use, whatever `max_size` said. Connections are
+pooled (`psycopg_pool`, `PG_POOL_ENABLED`) with the OAuth token minted per
+connection at connect time, so the handshake in the second branch above is rare:
+a full browse-and-book session on the deployed app used three connections total.
+
 Decision log with the full rationale for each of these: `docs/DECISIONS.md`.
 (An expanded `docs/ARCHITECTURE.md` is still to be written.)
 
@@ -270,8 +316,9 @@ layer.
   (bronze → silver → gold), materialized views for occupancy and revenue, and
   AI/BI dashboards or Genie for business users, all over the Unity Catalog
   registration of the Lakebase database.
-- **API tier**: stateless FastAPI behind a CDN, horizontal scaling, connection
-  pooling with token refresh, rate limiting per client.
+- **API tier**: connection pooling with token refresh is already in place (see
+  *One request, end to end* above); what remains is a stateless FastAPI behind a
+  CDN, horizontal scaling across app instances, and rate limiting per client.
 - **Operations**: Unity Catalog audit logs and system tables for observability,
   multi-region deployment with regional Lakebase instances, bundles promoted
   through dev → staging → prod by a service principal.

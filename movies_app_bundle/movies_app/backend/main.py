@@ -81,7 +81,7 @@ async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict:
+def health() -> dict:
     result: dict = {
         "status": "ok",
         "instance": settings.lakebase_instance,

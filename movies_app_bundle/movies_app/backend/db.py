@@ -2,8 +2,20 @@
 
 Credentials: OAuth token minted via the Databricks SDK, cached for 50 minutes
 (tokens valid ~1 hour). Host resolved from PGHOST (platform-injected) or the
-SDK's get_database_instance(). One connection per request by default; uses
-a connection pool when PG_POOL_ENABLED is true (default).
+SDK's get_database_instance(). Connections come from a psycopg pool when
+PG_POOL_ENABLED is true (default), otherwise one connection per request.
+
+Threading contract: every call here blocks, and is made from FastAPI's
+threadpool rather than from the event loop -- the API handlers are sync `def`
+for exactly that reason, so several threads run through this module at once and
+the pool's max_size becomes real concurrency instead of decoration. The
+module-level caches (_ws, _host, _token, _pool) are therefore guarded by a
+re-entrant lock; _get_token() holds it across the SDK call so a rotation mints
+one token rather than one per waiting thread.
+
+The pool stays synchronous on purpose. An AsyncConnectionPool would have to run
+_get_host() and _get_token() -- blocking Databricks SDK calls -- inside
+connect(), which puts the block back on the event loop where it hurts most.
 """
 
 from __future__ import annotations
@@ -27,7 +39,8 @@ logger = logging.getLogger(__name__)
 
 TOKEN_LIFETIME_SECONDS = 50 * 60
 
-_lock = threading.Lock()
+# Re-entrant: _get_token() holds it and calls _client(), which takes it again.
+_lock = threading.RLock()
 _token: str | None = None
 _token_created_at: float = 0.0
 _host: str | None = None
@@ -37,19 +50,23 @@ _pool: ConnectionPool | None = None
 
 def _client() -> WorkspaceClient:
     global _ws
-    if _ws is None:
-        _ws = WorkspaceClient()
-    return _ws
+    with _lock:
+        if _ws is None:
+            _ws = WorkspaceClient()
+        return _ws
 
 
 def _get_host() -> str:
     global _host
     if settings.pghost:
         return settings.pghost
-    if _host is None:
-        instance = _client().database.get_database_instance(settings.lakebase_instance)
-        _host = instance.read_write_dns
-    return _host
+    with _lock:
+        if _host is None:
+            instance = _client().database.get_database_instance(
+                settings.lakebase_instance
+            )
+            _host = instance.read_write_dns
+        return _host
 
 
 def _get_user() -> str:

@@ -5,16 +5,18 @@ from fastapi import APIRouter, HTTPException, Query
 from .. import db
 from ..models import Movie, Showtime, Theater
 
+# Handlers are sync `def` on purpose: psycopg blocks, so FastAPI runs them in
+# its threadpool and requests can overlap. See backend/db.py for the contract.
 router = APIRouter(prefix="/api", tags=["catalog"])
 
 
 @router.get("/movies", response_model=list[Movie])
-async def list_movies() -> list[dict]:
+def list_movies() -> list[dict]:
     return db.query("SELECT * FROM movies ORDER BY title")
 
 
 @router.get("/movies/{movie_id}", response_model=Movie)
-async def get_movie(movie_id: str) -> dict:
+def get_movie(movie_id: str) -> dict:
     rows = db.query("SELECT * FROM movies WHERE movie_id = %s", (movie_id,))
     if not rows:
         raise HTTPException(404, "Movie not found")
@@ -22,12 +24,12 @@ async def get_movie(movie_id: str) -> dict:
 
 
 @router.get("/theaters", response_model=list[Theater])
-async def list_theaters() -> list[dict]:
+def list_theaters() -> list[dict]:
     return db.query("SELECT * FROM theaters ORDER BY name")
 
 
 @router.get("/showtimes", response_model=list[Showtime])
-async def list_showtimes(
+def list_showtimes(
     movie_id: str | None = Query(None),
     theater_id: str | None = Query(None),
     date: str | None = Query(None),

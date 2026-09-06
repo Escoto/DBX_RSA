@@ -3,7 +3,7 @@ resources:
     movies_db:
       name: ${var.lakebase_instance_name}
       capacity: CU_1 # smallest SKU; CU_2/CU_4/CU_8 for scale-up, readable secondaries for read scale-out
-      stopped: false # true to stop / false to start (..keep running)
+      stopped: true # true to stop / false to start (..keep running)
       lifecycle:
         prevent_destroy: false # allow destroy on `bundle destroy`.
   database_catalogs:

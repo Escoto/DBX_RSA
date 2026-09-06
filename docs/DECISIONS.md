@@ -241,3 +241,96 @@ if the root `package.json` defines a `build` script. The runtime ships Node.js
   single-OS machine; on this one it is the two-shell ritual. Rejected.
 - **A bundle `artifacts` build step.** Runs on the deploying machine at
   `bundle deploy`, which here is WSL without Node. Rejected.
+
+---
+
+## ADR-005 — Inject PGHOST via valueFrom; fix connection leak and error visibility
+
+**Date:** 2026-09-06 · **Phase:** 5 · **Status:** accepted · **Changes:** `app.yaml`, `backend/db.py`, `backend/main.py`, `backend/config.py`
+
+### Context
+
+The deployed app returned 500 on every `/api/*` call that touched Lakebase.
+Locally the same code worked, so the issue was specific to the app's service
+principal running on the Databricks Apps platform.
+
+Investigation confirmed: the SP's Postgres role existed, had USAGE + full DML
+on all 7 tables, and the Lakebase instance was AVAILABLE. But the SP was not
+in the database instance's workspace-level ACL (`CAN_USE` / `CAN_MANAGE`);
+only `admins` and the owner had those permissions. The `database` app resource
+with `CAN_CONNECT_AND_CREATE` creates the Postgres role and grants it
+CONNECT/CREATE, but does not grant the workspace-level `CAN_USE` needed to
+call `GET /api/2.0/database/instances/{name}`.
+
+The code's `_get_host()` function (in `db.py`) fell back to that SDK call when
+`PGHOST` was not set, which it was not: `app.yaml` had no `valueFrom: lakebase`
+mapping, and the Databricks Apps documentation confirms PG* vars are not
+auto-injected — they must be declared. So every connection attempt started with
+a failing API call to resolve the host, and the 500 propagated from there.
+
+### Decision
+
+Three changes:
+
+1. **`app.yaml`:** add `PGHOST` with `valueFrom: lakebase`. For Lakebase
+   Provisioned, `valueFrom` resolves to the instance's host DNS. This
+   eliminates the `get_database_instance()` SDK call on the platform.
+
+2. **`db.py`:** fix the connection leak in `query()` and `execute()`. Both
+   used `with get_connection() as conn:`, which in psycopg 3 commits/rollbacks
+   but does not close the connection. Changed to `try/finally` with explicit
+   `conn.close()`. Also added `PGPASSWORD` support in `_get_token()` as a
+   future-proof path in case the platform ever injects it.
+
+3. **`main.py`:** enhanced `/api/health` to test each connection step
+   individually (SDK auth type, host resolution, user resolution, credential
+   generation, `SELECT 1`) and report where the failure is. Added a global
+   `@app.exception_handler(Exception)` that returns structured JSON on `/api/*`
+   500s with the error class and message, instead of an opaque "Internal Server
+   Error".
+
+### Consequences
+
+- The app no longer needs workspace-level `CAN_USE` on the database instance to
+  connect. The platform resolves the host at deploy time via `valueFrom`.
+- `generate_database_credential()` should still work because it checks database
+  instance roles (the SP is one), not workspace permissions.
+- Connection leak is fixed; each `query()`/`execute()` call now properly closes
+  its connection.
+- If a future 500 occurs, the response body names the error class and message,
+  making platform debugging possible without log access (the `apps logs` CLI
+  command requires OAuth, not PAT).
+
+### Alternatives considered
+
+- **Grant `CAN_USE` to the SP via the workspace permissions API.** Attempted;
+  the API silently ignored service principals on database instances (the SP
+  never appeared in the ACL after PATCH or PUT). A platform limitation or bug.
+- **Use the Databricks CLI `apps logs` command.** Requires OAuth authentication;
+  the CLI profile uses a PAT. Not available for this debugging session.
+
+---
+
+## ADR-006 — Connection pooling with dynamic credentials
+
+**Date:** 2026-09-06 · **Phase:** 5 · **Status:** accepted · **Changes:** \ackend/db.py\, \ackend/main.py\, \ackend/config.py\, \CLAUDE.md\
+
+### Context
+
+The application connects to Lakebase using an OAuth token generated via \generate_database_credential()\, which is valid for approximately one hour. Initially, the application used a "one connection per request" strategy because connection pooling with static kwargs would capture a token at pool initialization, leading to authentication failures after the token expires (typically within an hour). However, for production scale, opening a new Postgres connection per request introduces significant latency overhead.
+
+### Decision
+
+Implement connection pooling using \psycopg_pool.ConnectionPool\, but handle the dynamic nature of the credentials by subclassing \psycopg.Connection\. 
+
+1. **Custom Connection Class:** Created \_LakebaseConnection\ inheriting from \psycopg.Connection\. By overriding the \connect()\ classmethod, the token is fetched dynamically *every time the pool opens a new connection*. This leverages the existing 50-minute token cache cleanly.
+2. **Pool Lifecycle:** \ConnectionPool\ is instantiated lazily and hooked into FastAPI's \lifespan\ context manager so it safely opens on startup (\wait=False\ to prevent crashing on DB unavailability) and closes on shutdown.
+3. **Pool Settings:** Configured with \max_lifetime=45*60\ to ensure connections are recycled *before* the 50-minute token cache rotation, avoiding any risk of a connection outliving its underlying credential logic.
+4. **Fallback Hatch:** Introduced a \PG_POOL_ENABLED\ (default \	rue\) environment variable. If pooling fails in the Apps environment, flipping this variable reverts to the direct-connect path without requiring a code change.
+
+### Consequences
+
+- **Performance:** Connection establishment overhead is removed from the critical path of each API request.
+- **Robustness:** Token rotation happens seamlessly as the pool scales or recycles older connections.
+- **Observability:** Added \pool.get_stats()\ to \/api/health\ so the live pool state (size, available, waiting) is visible in the Databricks Apps environment.
+- **Code Clarity:** The \	ransaction()\, \query()\, and \xecute()\ helpers were updated to use the pool's context manager, natively inheriting its strict rollback-on-exception and clean return-to-pool guarantees.

@@ -9,10 +9,12 @@ Bundles**.
 
 Built for the Databricks Resident Architect take-home exercise.
 
-> **Status (2026-09-04):** infrastructure and the app shell are deployed by the
-> bundle (Lakebase instance, Unity Catalog registration, analytics catalog and
-> schema, SQL warehouse, Databricks App); the schema and seed data are loaded.
-> Backend routes, the seat-map UI and the analytics job are in progress.
+> **Status (2026-09-06):** infrastructure is deployed by the bundle (Lakebase
+> instance, Unity Catalog registration, analytics catalog and schema, SQL
+> warehouse, Databricks App), the schema and seed data are loaded, and the
+> backend API and seat-map UI are complete — the full booking flow, including
+> the `409` on a raced seat, is verified against the live Lakebase. Remaining:
+> final verification of the deployed app on-platform, and the analytics job.
 
 ---
 
@@ -24,7 +26,7 @@ Built for the Databricks Resident Architect take-home exercise.
 | Workspace | `https://dbc-66830d2c-97a4.cloud.databricks.com` (Slalom) |
 | Lakebase instance | `movies-app-dev` (CU_1, Postgres 16), database `movies`, schema `movies` |
 | Unity Catalog (transactional) | `movies_app_dev.movies` — the Lakebase database registered as a UC catalog |
-| Unity Catalog (analytics, Delta) | `movies_analytics_dev.movies` — gold tables built by `analytics_job` |
+| Unity Catalog (analytics, Delta) | `movies_analytics_dev.movies` — catalog and schema deployed; gold tables are the pending `analytics_job` |
 | SQL warehouse | `movies_analytics` (serverless, 2X-Small) |
 | Tables | `movies`, `theaters`, `auditoriums`, `seats`, `showtimes`, `bookings`, `booking_seats` |
 | Bundle | `movies_app_bundle`, target `dev`, direct engine |
@@ -69,7 +71,7 @@ No login and no payment: both are explicitly out of scope for the exercise.
                      ┌──────────────────────────────┐
                      │ Unity Catalog                 │
                      │  movies_app_dev.movies.*      │  browse + query from warehouse movies_analytics
-                     │  movies_analytics_dev.movies.*│  Delta gold tables (analytics_job)
+                     │  movies_analytics_dev.movies.*│  Delta gold tables (analytics_job — planned)
                      └──────────────────────────────┘
 
 Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registration, analytics catalog + schema,
@@ -86,11 +88,58 @@ Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registr
 | UI | Vue 3 + Vite + TypeScript, prebuilt to static files | Streamlit/Dash; rejected because a seat map needs a real component model |
 | Transactional store | **Lakebase** (managed Postgres): enforced PK/FK/UNIQUE, row locks, ms commits | Delta via SQL warehouse: no unique constraints, no cross-table transactions, seconds per commit — fine for analytics, wrong for seat allocation |
 | Governance | Lakebase database registered in Unity Catalog (`database_catalogs`) | Copying rows into Delta with a job; unnecessary for browsing and querying the schema |
-| Analytics | Delta gold tables in a bundle-managed catalog, built by a bundle job (`sql_task` on the bundle's own serverless warehouse reading the Lakebase catalog) | Lakeflow Declarative Pipeline; a single SQL task is enough for two gold tables |
+| Analytics *(planned)* | Delta gold tables in a bundle-managed catalog, built by a bundle job (`sql_task` on the bundle's own serverless warehouse reading the Lakebase catalog) | Lakeflow Declarative Pipeline; a single SQL task is enough for two gold tables |
 | App → DB auth | App's own service principal + short-lived OAuth token via the Databricks SDK | Native Postgres passwords; disabled on the instance |
 | Infrastructure as code | Databricks Asset Bundles, direct engine, one `dev` target: database, catalogs, schema, warehouse, app and job in one bundle | Manual UI setup; bundles make every asset the panel sees reproducible from the repo |
 
-Details and trade-offs: `docs/ARCHITECTURE.md`.
+### One request, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Browser
+    participant L as Event loop (uvicorn, 1 thread)
+    participant T as Worker thread (1 of 40)
+    participant P as psycopg pool (min 2 / max 10)
+    participant PG as Lakebase Postgres
+
+    U->>L: GET /api/movies
+    activate L
+    Note over L: parse HTTP, match route.<br/>endpoint is def, not async def
+    L->>T: run_sync(list_movies)
+    deactivate L
+    Note over L: loop is free again —<br/>other users' requests keep arriving
+    activate T
+    T->>P: getconn, timeout 10s
+    alt idle connection available
+        P-->>T: reuse it, no handshake
+    else none free and size below max
+        P->>PG: mint OAuth token, TCP + TLS + auth
+        PG-->>P: new connection
+    end
+    T->>PG: SELECT
+    Note over T,PG: only THIS thread blocks.<br/>the loop and 39 other threads run on
+    PG-->>T: rows
+    T->>P: putconn, commit and check expiry
+    T-->>L: return value
+    deactivate T
+    activate L
+    Note over L: pydantic validation, JSON encoding
+    L-->>U: 200 with movie list
+    deactivate L
+```
+
+The API handlers are deliberately sync `def`, not `async def`. psycopg is a
+blocking driver, so FastAPI runs them in its threadpool and the event loop stays
+free to accept other requests; an `async def` handler would hold the loop for the
+whole database round trip and serialise every user behind it — which would also
+cap the pool at one connection in use, whatever `max_size` said. Connections are
+pooled (`psycopg_pool`, `PG_POOL_ENABLED`) with the OAuth token minted per
+connection at connect time, so the handshake in the second branch above is rare:
+a full browse-and-book session on the deployed app used three connections total.
+
+Decision log with the full rationale for each of these: `docs/DECISIONS.md`.
+(An expanded `docs/ARCHITECTURE.md` is still to be written.)
 
 ---
 
@@ -154,19 +203,17 @@ Interactive docs are served by FastAPI at `/docs` on the running app.
 ```
 dbx-movies-app/
 ├── README.md, CLAUDE.md            this file; build/decision log for AI-assisted work
-├── docs/                           architecture, data model, decisions, demo script, AI usage log
+├── docs/                           data model, decisions, AI usage log
 └── movies_app_bundle/              Databricks Asset Bundle (direct engine)
     ├── databricks.yml              variables, target, sync rules
     ├── resources/lakebase.yml      Lakebase instance + Unity Catalog registration
     ├── resources/lakehouse.yml     analytics catalog + schema + SQL warehouse
     ├── resources/app.yml           Databricks App + lakebase / sql-warehouse resources
-    ├── resources/analytics_job.yml sql_task → Delta gold tables
     ├── src/seed/                   check_connection.py, ddl.sql, seed_lakebase.py
-    ├── src/analytics/gold.sql      gold tables from the Lakebase catalog
     └── movies_app/                 app source (source_code_path)
         ├── app.yaml                command + env for Databricks Apps
         ├── package.json            build script that Databricks Apps runs at deploy → frontend/dist
-        ├── requirements.txt
+        ├── requirements.txt        requirements-dev.txt, Makefile
         ├── backend/                FastAPI
         ├── frontend/               Vue 3 + Vite + TS  →  frontend/dist
         └── tests/                  pytest
@@ -269,13 +316,15 @@ layer.
   (bronze → silver → gold), materialized views for occupancy and revenue, and
   AI/BI dashboards or Genie for business users, all over the Unity Catalog
   registration of the Lakebase database.
-- **API tier**: stateless FastAPI behind a CDN, horizontal scaling, connection
-  pooling with token refresh, rate limiting per client.
+- **API tier**: connection pooling with token refresh is already in place (see
+  *One request, end to end* above); what remains is a stateless FastAPI behind a
+  CDN, horizontal scaling across app instances, and rate limiting per client.
 - **Operations**: Unity Catalog audit logs and system tables for observability,
   multi-region deployment with regional Lakebase instances, bundles promoted
   through dev → staging → prod by a service principal.
 
-One-page version with diagram: `docs/SCALE_TO_MILLIONS.md`.
+A one-page version with a diagram (`docs/SCALE_TO_MILLIONS.md`) is still to be
+written.
 
 ---
 
@@ -295,6 +344,6 @@ flow on-platform.
 ## Not built (deliberately)
 
 Seat holds with expiry, cancellations and refunds, authentication, payments,
-multi-currency, synced reference tables, staging/prod targets. Each is
-described with its Databricks mapping in `docs/SCALE_TO_MILLIONS.md` and
+multi-currency, synced reference tables, staging/prod targets. Each is sketched
+with its Databricks mapping under "Taking it to millions of users" above and in
 `docs/DECISIONS.md`.

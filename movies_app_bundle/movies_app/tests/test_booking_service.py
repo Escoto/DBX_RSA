@@ -49,13 +49,24 @@ def _happy_cursor():
     def _execute(sql, params=None):
         if "INSERT INTO bookings" in sql and "booking_seats" not in sql:
             cur.description = [
-                ("booking_id",), ("showtime_id",), ("customer_name",),
-                ("customer_email",), ("status",), ("total_amount",),
-                ("created_at",), ("cancelled_at",),
+                ("booking_id",),
+                ("showtime_id",),
+                ("customer_name",),
+                ("customer_email",),
+                ("status",),
+                ("total_amount",),
+                ("created_at",),
+                ("cancelled_at",),
             ]
             cur.fetchone.return_value = (
-                BOOKING_ID, "st-1", "Alice", "alice@example.com",
-                "CONFIRMED", Decimal("0"), CREATED_AT, None,
+                BOOKING_ID,
+                "st-1",
+                "Alice",
+                "alice@example.com",
+                "CONFIRMED",
+                Decimal(0),
+                CREATED_AT,
+                None,
             )
         elif "INSERT INTO booking_seats" in sql:
             cur.rowcount = 2
@@ -64,8 +75,11 @@ def _happy_cursor():
             cur.fetchone.return_value = (Decimal("25.00"),)
         elif "booking_seats bs" in sql:
             cur.description = [
-                ("seat_id",), ("row_label",), ("seat_number",),
-                ("seat_type",), ("price",),
+                ("seat_id",),
+                ("row_label",),
+                ("seat_number",),
+                ("seat_type",),
+                ("price",),
             ]
             cur.fetchall.return_value = [
                 ("aud-01-A01", "A", 1, "standard", Decimal("12.50")),
@@ -77,6 +91,7 @@ def _happy_cursor():
 
 
 # ---- happy path ----
+
 
 @patch("backend.services.booking_service.db")
 def test_create_booking_happy_path(mock_db):
@@ -104,6 +119,7 @@ def test_create_booking_happy_path(mock_db):
 
 # ---- unique violation → 409 with taken seat ids ----
 
+
 @patch("backend.services.booking_service.db")
 def test_unique_violation_returns_taken_seats(mock_db):
     from psycopg.errors import UniqueViolation
@@ -119,18 +135,27 @@ def test_unique_violation_returns_taken_seats(mock_db):
     def _execute(sql, params=None):
         if "INSERT INTO bookings" in sql and "booking_seats" not in sql:
             cur.description = [
-                ("booking_id",), ("showtime_id",), ("customer_name",),
-                ("customer_email",), ("status",), ("total_amount",),
-                ("created_at",), ("cancelled_at",),
+                ("booking_id",),
+                ("showtime_id",),
+                ("customer_name",),
+                ("customer_email",),
+                ("status",),
+                ("total_amount",),
+                ("created_at",),
+                ("cancelled_at",),
             ]
             cur.fetchone.return_value = (
-                BOOKING_ID, "st-1", "Alice", "alice@example.com",
-                "CONFIRMED", Decimal("0"), CREATED_AT, None,
+                BOOKING_ID,
+                "st-1",
+                "Alice",
+                "alice@example.com",
+                "CONFIRMED",
+                Decimal(0),
+                CREATED_AT,
+                None,
             )
         elif "INSERT INTO booking_seats" in sql:
-            raise UniqueViolation(
-                "duplicate key value violates unique constraint"
-            )
+            raise UniqueViolation("duplicate key value violates unique constraint")
 
     cur.execute.side_effect = _execute
     mock_db.transaction = _fake_transaction(cur)
@@ -149,6 +174,7 @@ def test_unique_violation_returns_taken_seats(mock_db):
 
 # ---- validation: showtime not found ----
 
+
 @patch("backend.services.booking_service.db")
 def test_showtime_not_found(mock_db):
     mock_db.query.side_effect = [
@@ -163,6 +189,7 @@ def test_showtime_not_found(mock_db):
 
 
 # ---- validation: past showtime ----
+
 
 @patch("backend.services.booking_service.db")
 def test_past_showtime(mock_db):
@@ -179,6 +206,7 @@ def test_past_showtime(mock_db):
 
 # ---- validation: seats not in the auditorium ----
 
+
 @patch("backend.services.booking_service.db")
 def test_invalid_seats(mock_db):
     mock_db.query.side_effect = [
@@ -187,14 +215,13 @@ def test_invalid_seats(mock_db):
     ]
 
     with pytest.raises(ValidationError) as exc_info:
-        create_booking(
-            "st-1", ["aud-01-A01", "aud-99-Z01"], "Alice", "a@b.com"
-        )
+        create_booking("st-1", ["aud-01-A01", "aud-99-Z01"], "Alice", "a@b.com")
 
     assert "aud-99-Z01" in exc_info.value.detail
 
 
 # ---- validation: duplicate seat ids ----
+
 
 @patch("backend.services.booking_service.db")
 def test_duplicate_seat_ids(mock_db):
@@ -203,8 +230,6 @@ def test_duplicate_seat_ids(mock_db):
     ]
 
     with pytest.raises(ValidationError) as exc_info:
-        create_booking(
-            "st-1", ["aud-01-A01", "aud-01-A01"], "Alice", "a@b.com"
-        )
+        create_booking("st-1", ["aud-01-A01", "aud-01-A01"], "Alice", "a@b.com")
 
     assert "duplicate" in exc_info.value.detail.lower()

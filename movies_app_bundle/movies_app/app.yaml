@@ -11,5 +11,7 @@ env:
     value: movies                # must equal var.lakebase_database
   - name: LAKEBASE_SCHEMA
     value: movies
+  - name: PGHOST
+    valueFrom: lakebase
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse

@@ -13,6 +13,7 @@ PLATFORM_VARS = [
     "PGPORT",
     "PGDATABASE",
     "PGUSER",
+    "PGPASSWORD",
     "PGSSLMODE",
 ]
 
@@ -25,6 +26,7 @@ class Settings:
         self.pghost: str | None = os.environ.get("PGHOST")
         self.pgport = int(os.environ.get("PGPORT", "5432"))
         self.pguser: str | None = os.environ.get("PGUSER")
+        self.pgpassword: str | None = os.environ.get("PGPASSWORD")
         self.pgsslmode = os.environ.get("PGSSLMODE", "require")
         self.app_port = int(os.environ.get("DATABRICKS_APP_PORT", "8000"))
 

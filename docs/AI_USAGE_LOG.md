@@ -261,3 +261,143 @@ Lakebase):**
 
 **Rough split:** ~90% AI (code, styling, verification), ~10% human (spec,
 design tokens, review).
+
+---
+
+## Phase 5 — Deploy + debug Lakebase connection on the platform (2026-09-06)
+
+**What AI did (~95% of the debugging and fix):**
+
+- Diagnosed why the deployed app returned 500 on every API call touching
+  Lakebase while working locally. Could not access the app directly (Databricks
+  Apps requires OAuth, not PAT) or the runtime logs (`apps logs` needs OAuth).
+- Connected to Lakebase as the owner and verified: SP Postgres role exists with
+  USAGE + full DML on all 7 tables; instance AVAILABLE; all grants intact.
+- Discovered the SP was absent from the database instance's workspace-level ACL
+  (only `admins`, the owner, and the `users` group with `CAN_CREATE`).
+  Attempted to grant `CAN_USE` via the permissions API; the API silently
+  ignored service principals on database instances.
+- Read the Databricks Apps documentation (resources page, environment variables
+  page) and found that `valueFrom: lakebase` for a Lakebase Provisioned
+  database resolves to the host DNS, and that PG* vars are NOT auto-injected —
+  they must be declared explicitly in `app.yaml`.
+- Root cause: `app.yaml` had no `PGHOST` mapping, so `db.py` fell back to
+  `get_database_instance()` via the workspace API, which the SP can't call
+  (no `CAN_USE`). The host resolution failed, making every connection attempt
+  500.
+- Fix (ADR-005): added `PGHOST` with `valueFrom: lakebase` to `app.yaml`.
+  Also fixed the psycopg 3 connection leak in `query()`/`execute()`, added
+  `PGPASSWORD` support as a future-proof fallback, enhanced `/api/health` with
+  step-by-step diagnostics (SDK auth type, host, user, token, connection), and
+  added a global exception handler for structured 500 responses on `/api/*`.
+- `bundle validate` passes; all 6 tests pass; local smoke test (health, movies,
+  showtimes) succeeds.
+
+**What the human provided:**
+
+- The bug report with structured debug steps.
+- The standing constraints: WSL for Databricks CLI, no `bundle destroy`, no
+  Windows CLI.
+- Deployment and verification against the live platform (pending).
+
+**Verification (pending):**
+
+- `bundle deploy -t dev` then `bundle run movies_app -t dev`
+- Open the app URL, hit `/api/health` — expect `status: ok`,
+  `pghost_injected: true`, `db: connected`
+- Complete a booking end to end: grid → movie → seat map → 201
+- Confirm the booking row in Catalog Explorer
+  (`movies_app_dev.movies.booking_seats`)
+
+**Rough split:** ~90% AI (investigation, docs lookup, root cause, fix), ~10%
+human (bug report, deployment).
+
+---
+
+## Phase 5 addendum — connection pooling: review, non-blocking fix, verification (2026-09-06)
+
+**Where this started.** The human asked for a consolidated table of the
+performance and scale optimisations proposed across `README.md` and
+`DECISIONS.md` — 15 of them, from idempotency keys to multi-region — then picked
+two to pursue: idempotency keys on `POST /api/bookings` and connection pooling.
+AI wrote an implementation plan for both, sequencing pooling first because it is
+contained entirely in `db.py` and changes no callers, while idempotency touches
+DDL, service, router, frontend and tests.
+
+**What arrived for review.** The pooling implementation landed as an uncommitted
+diff across 10 files: `psycopg_pool.ConnectionPool`, a `_LakebaseConnection`
+subclass overriding `connect()` so the OAuth token is minted per connection,
+lifespan open/close, `PG_POOL_*` settings, pool stats in `/api/health`, and
+ADR-006. *(Authorship: TBD — human to record whether this was written by hand or
+in another AI session.)*
+
+**The review (Claude Opus, `/code-review high`) — 10 findings.** The review
+verified psycopg_pool's actual behaviour rather than asserting it from memory:
+the library was installed into a scratchpad with `pip --target`, its `_connect`,
+`connection()` and `_shrink_pool` sources read, and the pool probed directly.
+That produced three facts inspection alone would have missed — the pool really
+does call `connection_class.connect(conninfo, **kwargs)`, so the custom-connection
+approach is sound; an unopened pool raises `PoolClosed` yet still reports
+`pool_size: 2` from `get_stats()`, so a dead pool looks healthy in the health
+endpoint; and `_connect` sets a per-attempt `connect_timeout` that the override
+was clobbering.
+
+**The finding that mattered.** Every route handler was `async def` while calling
+blocking psycopg. The event loop is one thread, so the whole application
+serialised on it, and no more than one pooled connection could ever be checked
+out — `max_size: 10` was decoration. The feature had been added for concurrency
+and delivered none. This is the Phase 2 addendum pattern again: an AI review pass
+over AI-assisted code found what neither the implementation nor the human had.
+
+**The human's call.** Fix only the blocking problem now; leave the other nine
+findings for later. That kept the change small enough to deploy and verify in one
+pass.
+
+**The fix.** Seven `/api` handlers plus `/api/health` changed from `async def` to
+`def`, so FastAPI runs them in its threadpool. That made `db.py`'s module caches
+genuinely concurrent for the first time, so `_client()` and `_get_host()` gained
+lock guards and `_lock` became an `RLock` — `_get_token()` holds it and calls
+`_client()`, which with a plain `Lock` would have deadlocked against itself.
+Those races existed all along but were unreachable while everything ran on one
+thread. Added rationale comments in each router and the `db.py` docstring, plus
+`tests/test_handlers_nonblocking.py` asserting no `/api` endpoint is a coroutine
+function.
+
+**Verification — measured, not asserted:**
+
+- Four concurrent 300 ms queries through the real ASGI app: **1.21 s before,
+  0.32 s after.**
+- Mutation check: reverting one handler to `async def` restores the 1.21 s and
+  fails the new test.
+- `pytest` → 7/7.
+- On the **deployed** app (human): `/api/health` showed the pool open with 2
+  connections; after browsing and creating bookings, `pool_size: 3`,
+  `pool_available: 3`, `connections_num: 3`, `requests_waiting: 0`. Three
+  physical connections served dozens of operations (reuse), the pool grew past
+  `min_size` — which psycopg_pool only does when every existing connection is
+  already checked out, so requests genuinely overlapped on the platform — and
+  every connection came back (no leaks, including through the rollback path).
+
+**Documentation.** `README.md` gained a mermaid sequence diagram of a single
+request through the loop, threadpool, pool and Lakebase, with prose on why the
+handlers are sync. The *Taking it to millions* section still listed connection
+pooling as future work and was corrected.
+
+**Still open, deliberately deferred:** `max_lifetime` is measured from connect
+time rather than token issuance, so a connection can outlive its credential;
+`/api/health` has two identical `if/else` branches and therefore never exercises
+the pool it reports on; `PG_POOL_*` is absent from `app.yaml`, so the documented
+fallback needs a redeploy anyway; ADR-006's control characters; the
+`connect_timeout` clobber; a wildcard version pin; and the duplicated non-pool
+branches in the three `db.py` helpers.
+
+**Two AI failures worth logging.** ADR-006 was written through a shell with
+escaped backticks and shipped literal control characters (0x08, 0x09, 0x1B) into
+a panel-facing document — exactly the quoting hazard CLAUDE.md §11 warns about,
+and still uncorrected. Separately, `sed -i` silently stripped the CRLF line
+endings from `main.py`, turning a one-word change into a 188-line diff; caught in
+review of the diff and restored.
+
+**Rough split:** ~85% AI (plan, review, fix, measurement, docs), ~15% human (the
+two optimisations to pursue, the scope call to fix only the blocking issue,
+deployment and on-platform verification).

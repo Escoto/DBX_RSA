@@ -9,10 +9,12 @@ Bundles**.
 
 Built for the Databricks Resident Architect take-home exercise.
 
-> **Status (2026-09-04):** infrastructure and the app shell are deployed by the
-> bundle (Lakebase instance, Unity Catalog registration, analytics catalog and
-> schema, SQL warehouse, Databricks App); the schema and seed data are loaded.
-> Backend routes, the seat-map UI and the analytics job are in progress.
+> **Status (2026-09-06):** infrastructure is deployed by the bundle (Lakebase
+> instance, Unity Catalog registration, analytics catalog and schema, SQL
+> warehouse, Databricks App), the schema and seed data are loaded, and the
+> backend API and seat-map UI are complete — the full booking flow, including
+> the `409` on a raced seat, is verified against the live Lakebase. Remaining:
+> final verification of the deployed app on-platform, and the analytics job.
 
 ---
 
@@ -24,7 +26,7 @@ Built for the Databricks Resident Architect take-home exercise.
 | Workspace | `https://dbc-66830d2c-97a4.cloud.databricks.com` (Slalom) |
 | Lakebase instance | `movies-app-dev` (CU_1, Postgres 16), database `movies`, schema `movies` |
 | Unity Catalog (transactional) | `movies_app_dev.movies` — the Lakebase database registered as a UC catalog |
-| Unity Catalog (analytics, Delta) | `movies_analytics_dev.movies` — gold tables built by `analytics_job` |
+| Unity Catalog (analytics, Delta) | `movies_analytics_dev.movies` — catalog and schema deployed; gold tables are the pending `analytics_job` |
 | SQL warehouse | `movies_analytics` (serverless, 2X-Small) |
 | Tables | `movies`, `theaters`, `auditoriums`, `seats`, `showtimes`, `bookings`, `booking_seats` |
 | Bundle | `movies_app_bundle`, target `dev`, direct engine |
@@ -69,7 +71,7 @@ No login and no payment: both are explicitly out of scope for the exercise.
                      ┌──────────────────────────────┐
                      │ Unity Catalog                 │
                      │  movies_app_dev.movies.*      │  browse + query from warehouse movies_analytics
-                     │  movies_analytics_dev.movies.*│  Delta gold tables (analytics_job)
+                     │  movies_analytics_dev.movies.*│  Delta gold tables (analytics_job — planned)
                      └──────────────────────────────┘
 
 Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registration, analytics catalog + schema,
@@ -86,11 +88,12 @@ Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registr
 | UI | Vue 3 + Vite + TypeScript, prebuilt to static files | Streamlit/Dash; rejected because a seat map needs a real component model |
 | Transactional store | **Lakebase** (managed Postgres): enforced PK/FK/UNIQUE, row locks, ms commits | Delta via SQL warehouse: no unique constraints, no cross-table transactions, seconds per commit — fine for analytics, wrong for seat allocation |
 | Governance | Lakebase database registered in Unity Catalog (`database_catalogs`) | Copying rows into Delta with a job; unnecessary for browsing and querying the schema |
-| Analytics | Delta gold tables in a bundle-managed catalog, built by a bundle job (`sql_task` on the bundle's own serverless warehouse reading the Lakebase catalog) | Lakeflow Declarative Pipeline; a single SQL task is enough for two gold tables |
+| Analytics *(planned)* | Delta gold tables in a bundle-managed catalog, built by a bundle job (`sql_task` on the bundle's own serverless warehouse reading the Lakebase catalog) | Lakeflow Declarative Pipeline; a single SQL task is enough for two gold tables |
 | App → DB auth | App's own service principal + short-lived OAuth token via the Databricks SDK | Native Postgres passwords; disabled on the instance |
 | Infrastructure as code | Databricks Asset Bundles, direct engine, one `dev` target: database, catalogs, schema, warehouse, app and job in one bundle | Manual UI setup; bundles make every asset the panel sees reproducible from the repo |
 
-Details and trade-offs: `docs/ARCHITECTURE.md`.
+Decision log with the full rationale for each of these: `docs/DECISIONS.md`.
+(An expanded `docs/ARCHITECTURE.md` is still to be written.)
 
 ---
 
@@ -154,19 +157,17 @@ Interactive docs are served by FastAPI at `/docs` on the running app.
 ```
 dbx-movies-app/
 ├── README.md, CLAUDE.md            this file; build/decision log for AI-assisted work
-├── docs/                           architecture, data model, decisions, demo script, AI usage log
+├── docs/                           data model, decisions, AI usage log
 └── movies_app_bundle/              Databricks Asset Bundle (direct engine)
     ├── databricks.yml              variables, target, sync rules
     ├── resources/lakebase.yml      Lakebase instance + Unity Catalog registration
     ├── resources/lakehouse.yml     analytics catalog + schema + SQL warehouse
     ├── resources/app.yml           Databricks App + lakebase / sql-warehouse resources
-    ├── resources/analytics_job.yml sql_task → Delta gold tables
     ├── src/seed/                   check_connection.py, ddl.sql, seed_lakebase.py
-    ├── src/analytics/gold.sql      gold tables from the Lakebase catalog
     └── movies_app/                 app source (source_code_path)
         ├── app.yaml                command + env for Databricks Apps
         ├── package.json            build script that Databricks Apps runs at deploy → frontend/dist
-        ├── requirements.txt
+        ├── requirements.txt        requirements-dev.txt, Makefile
         ├── backend/                FastAPI
         ├── frontend/               Vue 3 + Vite + TS  →  frontend/dist
         └── tests/                  pytest
@@ -275,7 +276,8 @@ layer.
   multi-region deployment with regional Lakebase instances, bundles promoted
   through dev → staging → prod by a service principal.
 
-One-page version with diagram: `docs/SCALE_TO_MILLIONS.md`.
+A one-page version with a diagram (`docs/SCALE_TO_MILLIONS.md`) is still to be
+written.
 
 ---
 
@@ -295,6 +297,6 @@ flow on-platform.
 ## Not built (deliberately)
 
 Seat holds with expiry, cancellations and refunds, authentication, payments,
-multi-currency, synced reference tables, staging/prod targets. Each is
-described with its Databricks mapping in `docs/SCALE_TO_MILLIONS.md` and
+multi-currency, synced reference tables, staging/prod targets. Each is sketched
+with its Databricks mapping under "Taking it to millions of users" above and in
 `docs/DECISIONS.md`.

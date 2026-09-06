@@ -13,3 +13,11 @@ deploy:
 	@databricks bundle validate
 	@databricks bundle deploy
 	@echo "$(GREEN)Done.$(RESET)"
+
+release:
+	@echo "$(CYAN)Deploying Bundle...$(RESET)"
+	@databricks bundle validate
+	@databricks bundle deploy
+	@echo "$(CYAN)Deploying App...$(RESET)"
+	@databricks bundle run movies_app
+	@echo "$(GREEN)Done.$(RESET)"

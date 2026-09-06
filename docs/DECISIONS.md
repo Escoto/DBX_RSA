@@ -308,3 +308,29 @@ Three changes:
   never appeared in the ACL after PATCH or PUT). A platform limitation or bug.
 - **Use the Databricks CLI `apps logs` command.** Requires OAuth authentication;
   the CLI profile uses a PAT. Not available for this debugging session.
+
+---
+
+## ADR-006 — Connection pooling with dynamic credentials
+
+**Date:** 2026-09-06 · **Phase:** 5 · **Status:** accepted · **Changes:** \ackend/db.py\, \ackend/main.py\, \ackend/config.py\, \CLAUDE.md\
+
+### Context
+
+The application connects to Lakebase using an OAuth token generated via \generate_database_credential()\, which is valid for approximately one hour. Initially, the application used a "one connection per request" strategy because connection pooling with static kwargs would capture a token at pool initialization, leading to authentication failures after the token expires (typically within an hour). However, for production scale, opening a new Postgres connection per request introduces significant latency overhead.
+
+### Decision
+
+Implement connection pooling using \psycopg_pool.ConnectionPool\, but handle the dynamic nature of the credentials by subclassing \psycopg.Connection\. 
+
+1. **Custom Connection Class:** Created \_LakebaseConnection\ inheriting from \psycopg.Connection\. By overriding the \connect()\ classmethod, the token is fetched dynamically *every time the pool opens a new connection*. This leverages the existing 50-minute token cache cleanly.
+2. **Pool Lifecycle:** \ConnectionPool\ is instantiated lazily and hooked into FastAPI's \lifespan\ context manager so it safely opens on startup (\wait=False\ to prevent crashing on DB unavailability) and closes on shutdown.
+3. **Pool Settings:** Configured with \max_lifetime=45*60\ to ensure connections are recycled *before* the 50-minute token cache rotation, avoiding any risk of a connection outliving its underlying credential logic.
+4. **Fallback Hatch:** Introduced a \PG_POOL_ENABLED\ (default \	rue\) environment variable. If pooling fails in the Apps environment, flipping this variable reverts to the direct-connect path without requiring a code change.
+
+### Consequences
+
+- **Performance:** Connection establishment overhead is removed from the critical path of each API request.
+- **Robustness:** Token rotation happens seamlessly as the pool scales or recycles older connections.
+- **Observability:** Added \pool.get_stats()\ to \/api/health\ so the live pool state (size, available, waiting) is visible in the Databricks Apps environment.
+- **Code Clarity:** The \	ransaction()\, \query()\, and \xecute()\ helpers were updated to use the pool's context manager, natively inheriting its strict rollback-on-exception and clean return-to-pool guarantees.

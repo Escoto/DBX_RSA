@@ -162,8 +162,9 @@ cached and refreshed after 50 min; short-circuited by `PGPASSWORD` when
 injected. Host: `PGHOST` if set, else `get_database_instance(...).read_write_dns`.
 User: `PGUSER`, else `DATABRICKS_CLIENT_ID` (app) or the user's email (local).
 Always `sslmode=require`, `dbname=LAKEBASE_DATABASE`,
-`options=-c search_path=movies`. One connection per request, always closed
-(a pool is the documented production optimization). All SQL is parameterized
+`options=-c search_path=movies`. Uses a connection pool (`psycopg_pool.ConnectionPool`)
+by default (controlled by `PG_POOL_ENABLED`) with a custom connection class to handle
+dynamic token minting at connect time. All SQL is parameterized
 with `%s`; never format user input into SQL. `src/seed/check_connection.py`
 implements the same credential path — reuse it.
 

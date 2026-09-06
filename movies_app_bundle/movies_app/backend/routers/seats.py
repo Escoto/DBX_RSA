@@ -8,9 +8,7 @@ from ..models import SeatDetail, SeatMapResponse, SeatMapShowtime, SeatRow
 router = APIRouter(prefix="/api", tags=["seats"])
 
 
-@router.get(
-    "/showtimes/{showtime_id}/seats", response_model=SeatMapResponse
-)
+@router.get("/showtimes/{showtime_id}/seats", response_model=SeatMapResponse)
 async def get_seat_map(showtime_id: str) -> SeatMapResponse:
     st_rows = db.query(
         "SELECT st.showtime_id, st.auditorium_id, st.starts_at, "

@@ -121,8 +121,21 @@ curl → UI POST returns 409, E5 turns red, E6 stays selected → second POST
 books E6 → confirmation `cd02dc6d-9658-41cd-9080-825183317f39`; the seat map
 then shows E5 and E6 booked; the mobile layout stacks the side panel.
 
-**Not built yet:** Phase 5 (deploy + verify on platform, README placeholders,
-`DEMO_SCRIPT.md`), the analytics job (Phase 6), and the remaining docs
+**Phase 5 in progress (2026-09-06).** The deployed app was returning 500 on
+every `/api/*` call that touched Lakebase. Root cause (ADR-005): `app.yaml`
+had no `PGHOST` mapping, so `db.py` called `get_database_instance()` via the
+workspace API to resolve the host; the SP lacked workspace-level `CAN_USE` on
+the database instance (the `database` app resource creates the Postgres role
+but does not grant the workspace ACL). Fix: added `PGHOST` with
+`valueFrom: lakebase` to `app.yaml`, which injects the host at deploy time.
+Also fixed the psycopg 3 connection leak in `query()`/`execute()` (was not
+closing connections), added `PGPASSWORD` support, enhanced `/api/health` with
+step-by-step diagnostics, and added a global exception handler for structured
+500 responses. Code changes are local; pending `bundle deploy` + `bundle run`
+and end-to-end verification on the platform.
+
+**Not built yet:** Phase 5 verification on platform, README placeholders,
+`DEMO_SCRIPT.md`, the analytics job (Phase 6), and the remaining docs
 (`ARCHITECTURE.md`, `SCALE_TO_MILLIONS.md`).
 
 **Hazards (still live)**
@@ -137,7 +150,9 @@ then shows E5 and E6 booked; the mobile layout stacks the side panel.
    back (and deploy) at least 15 minutes before the demo. `prevent_destroy` is
    `false` on every resource, so `bundle destroy` deletes the instance **and its
    data**; only the user runs it. Renaming the instance recreates it and
-   changes its DNS, so code must resolve the host through the SDK.
+   changes its DNS; on the platform `PGHOST` is now injected via
+   `valueFrom: lakebase` (ADR-005), so a rename is handled at deploy time.
+   Locally, `db.py` still resolves the host through the SDK.
 3. **`catalogs` needs the direct engine.** `bundle.engine: direct` is set; do
    not remove it (terraform silently drops the catalog resource).
 4. **Git is denied to Claude** (`.claude/settings.json`). The user commits.

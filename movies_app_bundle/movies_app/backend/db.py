@@ -8,6 +8,7 @@ avoids token-rotation problems in a pool.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -19,6 +20,8 @@ import psycopg
 from databricks.sdk import WorkspaceClient
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 TOKEN_LIFETIME_SECONDS = 50 * 60
 
@@ -57,6 +60,8 @@ def _get_user() -> str:
 
 def _get_token() -> str:
     global _token, _token_created_at
+    if settings.pgpassword:
+        return settings.pgpassword
     with _lock:
         now = time.monotonic()
         if _token and (now - _token_created_at) < TOKEN_LIFETIME_SECONDS:
@@ -71,12 +76,16 @@ def _get_token() -> str:
 
 
 def get_connection() -> psycopg.Connection:
+    host = _get_host()
+    user = _get_user()
+    token = _get_token()
+    logger.debug("connect host=%s user=%s port=%s db=%s", host, user, settings.pgport, settings.lakebase_database)
     return psycopg.connect(
-        host=_get_host(),
+        host=host,
         port=settings.pgport,
         dbname=settings.lakebase_database,
-        user=_get_user(),
-        password=_get_token(),
+        user=user,
+        password=token,
         sslmode=settings.pgsslmode,
         options=f"-c search_path={settings.lakebase_schema}",
         connect_timeout=15,
@@ -97,16 +106,22 @@ def transaction() -> Generator[psycopg.Connection, None, None]:
 
 
 def query(sql: str, params: tuple[Any, ...] | None = None) -> list[dict[str, Any]]:
-    with get_connection() as conn:
+    conn = get_connection()
+    try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             cols = [desc[0] for desc in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
 
 
 def execute(sql: str, params: tuple[Any, ...] | None = None) -> int:
-    with get_connection() as conn:
+    conn = get_connection()
+    try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             conn.commit()
             return cur.rowcount
+    finally:
+        conn.close()

@@ -261,3 +261,53 @@ Lakebase):**
 
 **Rough split:** ~90% AI (code, styling, verification), ~10% human (spec,
 design tokens, review).
+
+---
+
+## Phase 5 — Deploy + debug Lakebase connection on the platform (2026-09-06)
+
+**What AI did (~95% of the debugging and fix):**
+
+- Diagnosed why the deployed app returned 500 on every API call touching
+  Lakebase while working locally. Could not access the app directly (Databricks
+  Apps requires OAuth, not PAT) or the runtime logs (`apps logs` needs OAuth).
+- Connected to Lakebase as the owner and verified: SP Postgres role exists with
+  USAGE + full DML on all 7 tables; instance AVAILABLE; all grants intact.
+- Discovered the SP was absent from the database instance's workspace-level ACL
+  (only `admins`, the owner, and the `users` group with `CAN_CREATE`).
+  Attempted to grant `CAN_USE` via the permissions API; the API silently
+  ignored service principals on database instances.
+- Read the Databricks Apps documentation (resources page, environment variables
+  page) and found that `valueFrom: lakebase` for a Lakebase Provisioned
+  database resolves to the host DNS, and that PG* vars are NOT auto-injected —
+  they must be declared explicitly in `app.yaml`.
+- Root cause: `app.yaml` had no `PGHOST` mapping, so `db.py` fell back to
+  `get_database_instance()` via the workspace API, which the SP can't call
+  (no `CAN_USE`). The host resolution failed, making every connection attempt
+  500.
+- Fix (ADR-005): added `PGHOST` with `valueFrom: lakebase` to `app.yaml`.
+  Also fixed the psycopg 3 connection leak in `query()`/`execute()`, added
+  `PGPASSWORD` support as a future-proof fallback, enhanced `/api/health` with
+  step-by-step diagnostics (SDK auth type, host, user, token, connection), and
+  added a global exception handler for structured 500 responses on `/api/*`.
+- `bundle validate` passes; all 6 tests pass; local smoke test (health, movies,
+  showtimes) succeeds.
+
+**What the human provided:**
+
+- The bug report with structured debug steps.
+- The standing constraints: WSL for Databricks CLI, no `bundle destroy`, no
+  Windows CLI.
+- Deployment and verification against the live platform (pending).
+
+**Verification (pending):**
+
+- `bundle deploy -t dev` then `bundle run movies_app -t dev`
+- Open the app URL, hit `/api/health` — expect `status: ok`,
+  `pghost_injected: true`, `db: connected`
+- Complete a booking end to end: grid → movie → seat map → 201
+- Confirm the booking row in Catalog Explorer
+  (`movies_app_dev.movies.booking_seats`)
+
+**Rough split:** ~90% AI (investigation, docs lookup, root cause, fix), ~10%
+human (bug report, deployment).

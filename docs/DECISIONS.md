@@ -241,3 +241,70 @@ if the root `package.json` defines a `build` script. The runtime ships Node.js
   single-OS machine; on this one it is the two-shell ritual. Rejected.
 - **A bundle `artifacts` build step.** Runs on the deploying machine at
   `bundle deploy`, which here is WSL without Node. Rejected.
+
+---
+
+## ADR-005 — Inject PGHOST via valueFrom; fix connection leak and error visibility
+
+**Date:** 2026-09-06 · **Phase:** 5 · **Status:** accepted · **Changes:** `app.yaml`, `backend/db.py`, `backend/main.py`, `backend/config.py`
+
+### Context
+
+The deployed app returned 500 on every `/api/*` call that touched Lakebase.
+Locally the same code worked, so the issue was specific to the app's service
+principal running on the Databricks Apps platform.
+
+Investigation confirmed: the SP's Postgres role existed, had USAGE + full DML
+on all 7 tables, and the Lakebase instance was AVAILABLE. But the SP was not
+in the database instance's workspace-level ACL (`CAN_USE` / `CAN_MANAGE`);
+only `admins` and the owner had those permissions. The `database` app resource
+with `CAN_CONNECT_AND_CREATE` creates the Postgres role and grants it
+CONNECT/CREATE, but does not grant the workspace-level `CAN_USE` needed to
+call `GET /api/2.0/database/instances/{name}`.
+
+The code's `_get_host()` function (in `db.py`) fell back to that SDK call when
+`PGHOST` was not set, which it was not: `app.yaml` had no `valueFrom: lakebase`
+mapping, and the Databricks Apps documentation confirms PG* vars are not
+auto-injected — they must be declared. So every connection attempt started with
+a failing API call to resolve the host, and the 500 propagated from there.
+
+### Decision
+
+Three changes:
+
+1. **`app.yaml`:** add `PGHOST` with `valueFrom: lakebase`. For Lakebase
+   Provisioned, `valueFrom` resolves to the instance's host DNS. This
+   eliminates the `get_database_instance()` SDK call on the platform.
+
+2. **`db.py`:** fix the connection leak in `query()` and `execute()`. Both
+   used `with get_connection() as conn:`, which in psycopg 3 commits/rollbacks
+   but does not close the connection. Changed to `try/finally` with explicit
+   `conn.close()`. Also added `PGPASSWORD` support in `_get_token()` as a
+   future-proof path in case the platform ever injects it.
+
+3. **`main.py`:** enhanced `/api/health` to test each connection step
+   individually (SDK auth type, host resolution, user resolution, credential
+   generation, `SELECT 1`) and report where the failure is. Added a global
+   `@app.exception_handler(Exception)` that returns structured JSON on `/api/*`
+   500s with the error class and message, instead of an opaque "Internal Server
+   Error".
+
+### Consequences
+
+- The app no longer needs workspace-level `CAN_USE` on the database instance to
+  connect. The platform resolves the host at deploy time via `valueFrom`.
+- `generate_database_credential()` should still work because it checks database
+  instance roles (the SP is one), not workspace permissions.
+- Connection leak is fixed; each `query()`/`execute()` call now properly closes
+  its connection.
+- If a future 500 occurs, the response body names the error class and message,
+  making platform debugging possible without log access (the `apps logs` CLI
+  command requires OAuth, not PAT).
+
+### Alternatives considered
+
+- **Grant `CAN_USE` to the SP via the workspace permissions API.** Attempted;
+  the API silently ignored service principals on database instances (the SP
+  never appeared in the ACL after PATCH or PUT). A platform limitation or bug.
+- **Use the Databricks CLI `apps logs` command.** Requires OAuth authentication;
+  the CLI profile uses a PAT. Not available for this debugging session.

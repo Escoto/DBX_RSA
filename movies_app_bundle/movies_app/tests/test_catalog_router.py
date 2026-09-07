@@ -154,7 +154,7 @@ def test_list_showtimes_by_date(client, stub):
 
     client.get("/api/showtimes?date=2026-09-10")
 
-    assert "AND st.starts_at::date = %s::date" in stub.sql_for(SHOWTIMES_SQL)
+    assert "AND (st.starts_at AT TIME ZONE 'UTC')::date = %s::date" in stub.sql_for(SHOWTIMES_SQL)
     assert stub.params_for(SHOWTIMES_SQL) == ("2026-09-10",)
 
 
@@ -169,7 +169,7 @@ def test_list_showtimes_all_filters_keep_placeholder_order(client, stub):
     assert params == ("mov-01", "th-01", "2026-09-10")
     assert sql.count("%s") == 3
     assert sql.index("st.movie_id = %s") < sql.index("t.theater_id = %s")
-    assert sql.index("t.theater_id = %s") < sql.index("st.starts_at::date")
+    assert sql.index("t.theater_id = %s") < sql.index("(st.starts_at AT TIME ZONE 'UTC')::date")
 
 
 def test_list_showtimes_ordering_is_stable(client, stub):
@@ -179,3 +179,19 @@ def test_list_showtimes_ordering_is_stable(client, stub):
     client.get("/api/showtimes")
 
     assert "ORDER BY st.starts_at, t.name, a.name" in stub.sql_for(SHOWTIMES_SQL)
+
+
+def test_date_filter_does_not_depend_on_the_session_timezone(client, stub):
+    """`starts_at` is timestamptz, so a bare ::date resolves in the session
+    TimeZone, which nothing in the app sets. The frontend groups by UTC day
+    (frontend/src/utils/format.ts, dateKey), so the cast has to name UTC
+    explicitly or the two agree only by luck of the server's configuration.
+    """
+    stub.on(SHOWTIMES_SQL, [showtime_row()])
+
+    client.get("/api/showtimes?date=2026-09-10")
+
+    sql = stub.sql_for(SHOWTIMES_SQL)
+    assert "AT TIME ZONE 'UTC'" in sql
+    # The bare cast is the bug; it must not survive anywhere in the clause.
+    assert "st.starts_at::date" not in sql

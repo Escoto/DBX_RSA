@@ -414,7 +414,7 @@ affect the demo path; all are cheap to fix if pooling is revisited.
 | 2 | `get_stats()` on an unopened pool still reports `pool_size: 2`, so a `PoolClosed` pool reads as healthy | The lifespan opens the pool; a closed pool means the app failed to start |
 | 3 | `_LakebaseConnection.connect()` sets `connect_timeout=15` unconditionally, clobbering the per-attempt timeout `psycopg_pool` passes in | Only matters when the host is slow enough to exceed the pool's own 10 s budget |
 | 4 | `max_lifetime` counts from connect time, not from token issuance, so a connection can in principle outlive its credential | The 45 / 50 / 60-minute margins absorb it |
-| 5 | FastAPI's threadpool is 40 threads against `max_size: 10` with `timeout: 10`, so heavy load raises `PoolTimeout` → 500 rather than a graceful 503 | Demo traffic is one browser |
+| 5 | ~~FastAPI's threadpool is 40 threads against `max_size: 10` with `timeout: 10`, so heavy load raises `PoolTimeout` → 500 rather than a graceful 503~~ | **Resolved by ADR-008** |
 | 6 | `PG_POOL_*` is absent from `app.yaml`, so the escape hatch needs a redeploy anyway | A redeploy is two minutes |
 | 7 | `execute()` is unused, and the `if not pg_pool_enabled` branch is duplicated across all three helpers in `db.py` | Dead code, not wrong code |
 
@@ -465,3 +465,97 @@ seats while the header survives as an audit trail.
 - **Leave it listed as "stretch".** Rejected: a contract that advertises an
   endpoint the code does not serve is worse than a contract that says the
   feature was cut deliberately.
+
+---
+
+## ADR-008 — Size the threadpool from the pool; a saturated pool is a 503
+
+**Date:** 2026-09-07 · **Phase:** 6 · **Status:** accepted · **Changes:**
+`backend/config.py`, `backend/db.py`, `backend/main.py`; closes ADR-006
+Deferred item 5
+
+### Context
+
+ADR-006 pooled connections and moved the API handlers to sync `def` so FastAPI
+runs them in its threadpool — anyio's default, 40 threads. That number was
+never chosen with this app in mind; it is anyio's own default, picked with no
+knowledge of `PG_POOL_MAX=10` or the pool's `timeout`. Once all 10 pooled
+connections are checked out, the other threads queue inside psycopg_pool's own
+wait list, park for up to the timeout, and raise `psycopg_pool.PoolTimeout`.
+That exception was unhandled, so it fell into `main.py`'s catch-all
+`@app.exception_handler(Exception)` and came back as a `500` with the driver's
+raw message — a client-facing "server is broken" for what is actually the
+pool correctly refusing to over-admit work. Logged as ADR-006 Deferred item 5,
+tolerated at the time because demo traffic is one browser.
+
+Two things were accidental, not one: the threadpool size had no relationship
+to the two numbers that actually bound this app's DB concurrency (pool size,
+pool timeout), and the failure mode did not distinguish "the code is wrong"
+from "the pool is full right now."
+
+### Decision
+
+**1. Size the threadpool from the pool.** `config.py` pulls the pool's
+`timeout` out of its literal `10` inside `db.py`'s `ConnectionPool(...)` into
+`pg_pool_timeout` (env `PG_POOL_TIMEOUT`, default `10`), and adds
+`api_thread_pool_size` (env `API_THREAD_POOL_SIZE`), defaulting to
+`pg_pool_max + 4`. `main.py`'s lifespan sets
+`anyio.to_thread.current_default_thread_limiter().total_tokens` to it on
+startup — inside the lifespan because anyio scopes the limiter to the running
+event loop, and the lifespan runs on the loop that goes on to serve requests —
+and logs a warning if it is ever configured below `pg_pool_max`, since pooled
+connections would then sit idle no matter the load.
+
+The `+4` headroom is for blocking work that does not go through the pool —
+chiefly `/api/health`'s direct `get_connection()` call — so a health check
+does not compete with pooled requests for the same thread budget. It is
+deliberately small. The reason to bound the threadpool close to `pg_pool_max`
+at all, rather than leave generous slack, is that once the pool is full the
+*next* request should queue cheaply as a suspended coroutine waiting for a
+thread token — no OS thread, no contention on the pool's own wait queue —
+instead of piling up as a thread parked inside psycopg_pool for the full
+`pg_pool_timeout`. A wide gap between the two numbers (40 vs. 10) turns pool
+saturation into thread saturation as well.
+
+**2. `PoolTimeout` is backpressure, not a fault.** `main.py` registers
+`@app.exception_handler(psycopg_pool.PoolTimeout)`, returning `503` with
+`Retry-After: 2` and a structured body (`{"detail": ..., "error":
+"PoolTimeout"}`), instead of falling through to the generic `500` handler.
+Starlette resolves exception handlers by walking the raised exception's MRO,
+so registering the specific handler is enough regardless of where it sits
+relative to the catch-all — no dispatch logic needed in the generic handler
+itself. `Retry-After` is a short fixed hint (2s), not `pg_pool_timeout` itself:
+a request that reached this handler already waited up to `pg_pool_timeout` for
+a connection, so telling it to wait that long again would compound the
+latency instead of giving the pool a chance to drain.
+
+**3. `/api/health` reports all three numbers** (`pg_pool_max`,
+`pg_pool_timeout`, `api_thread_pool_size`) so the relationship is visible at
+runtime, not only in code.
+
+### Consequences
+
+- A saturated pool now surfaces as `503` with a machine-readable
+  `error: "PoolTimeout"` and a retry hint, distinguishable from a genuine bug
+  (`500`) by both status code and response shape.
+- The threadpool no longer over-admits relative to what the pool can actually
+  serve; concurrency beyond `api_thread_pool_size` queues at the cheap anyio
+  layer instead of the expensive, OS-thread-holding pool layer.
+- One more pair of env vars to keep in sync if `PG_POOL_MAX` changes —
+  mitigated by deriving the default from `pg_pool_max` rather than hardcoding
+  it, and by the startup warning if the two are set inconsistently.
+- `tests/test_pool_backpressure.py` pins the response shape, the header, the
+  threadpool-sizing function, and the config defaults (16 cases).
+
+### Alternatives considered
+
+- **Leave the threadpool at anyio's default and only fix the response code.**
+  Fixes the client-visible symptom but leaves ~30 threads free to pile up
+  waiting on 10 connections under load, each parked for the full timeout —
+  worse behaviour under saturation than admitting fewer requests up front.
+- **`Retry-After` equal to `pg_pool_timeout`.** Correct in spirit, needlessly
+  slow in practice: a connection freed a moment after the timeout fires would
+  leave the client waiting far longer than necessary for its retry.
+- **An app-level semaphore in front of the router**, independent of anyio's
+  limiter. More explicit, but duplicates a limiter FastAPI/anyio already
+  provide for exactly this purpose. Rejected as unnecessary machinery.

@@ -75,7 +75,7 @@ No login and no payment: both are explicitly out of scope for the exercise.
                      └──────────────────────────────┘
 
 Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registration, analytics catalog + schema,
-                                                 SQL warehouse, app, analytics job; uploads the app source
+                                                 SQL warehouse, app; uploads the app source
               databricks bundle run movies_app → app deployment on the Apps runtime: npm install, pip install,
                                                  npm run build (Vue → frontend/dist), then python -m backend.serve
               python src/seed/seed_lakebase.py → Postgres schema, tables, seed data, grants for the app
@@ -90,7 +90,7 @@ Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registr
 | Governance | Lakebase database registered in Unity Catalog (`database_catalogs`) | Copying rows into Delta with a job; unnecessary for browsing and querying the schema |
 | Analytics *(planned)* | Delta gold tables in a bundle-managed catalog, built by a bundle job (`sql_task` on the bundle's own serverless warehouse reading the Lakebase catalog) | Lakeflow Declarative Pipeline; a single SQL task is enough for two gold tables |
 | App → DB auth | App's own service principal + short-lived OAuth token via the Databricks SDK | Native Postgres passwords; disabled on the instance |
-| Infrastructure as code | Databricks Asset Bundles, direct engine, one `dev` target: database, catalogs, schema, warehouse, app and job in one bundle | Manual UI setup; bundles make every asset the panel sees reproducible from the repo |
+| Infrastructure as code | Databricks Asset Bundles, direct engine, one `dev` target: database, catalogs, schema, warehouse, and app in one bundle | Manual UI setup; bundles make every asset the panel sees reproducible from the repo |
 
 ### One request, end to end
 
@@ -240,7 +240,7 @@ dbx-movies-app/
 ```bash
 cd movies_app_bundle
 databricks bundle validate -t dev
-databricks bundle deploy   -t dev                           # Lakebase, UC registration, catalog, schema, warehouse, app, job; uploads the app source
+databricks bundle deploy   -t dev                           # Lakebase, UC registration, catalog, schema, warehouse, app; uploads the app source
 databricks bundle run movies_app -t dev                     # app deployment: npm install, pip install, npm run build (frontend → dist), start
 databricks apps get movies-app -p movies                    # note url + service_principal_client_id
 pip install "psycopg[binary]" databricks-sdk

@@ -151,7 +151,7 @@ def get_pool() -> ConnectionPool:
                 max_size=settings.pg_pool_max,
                 max_lifetime=45 * 60,
                 max_idle=5 * 60,
-                timeout=10,
+                timeout=settings.pg_pool_timeout,
                 open=False,
             )
         return _pool

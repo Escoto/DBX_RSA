@@ -382,7 +382,7 @@ WSL profile file. From the repo root:
 DATABRICKS_CONFIG_FILE=//wsl.localhost/Ubuntu-24.04/home/raescoto/.databrickscfg DATABRICKS_CONFIG_PROFILE=movies python movies_app_bundle/src/seed/check_connection.py
 
 # local backend — same two DATABRICKS_CONFIG_* vars plus:
-export LAKEBASE_INSTANCE=movies-app-dev LAKEBASE_DATABASE=movies LAKEBASE_SCHEMA=movies
+export LAKEBASE_INSTANCE=movies-app-dev LAKEBASE_DATABASE=movies_dev LAKEBASE_SCHEMA=movies
 cd movies_app_bundle/movies_app && pip install -r requirements.txt && python -m backend.serve
 
 # local frontend (the platform builds dist at deploy; a local build is only a check)
@@ -459,12 +459,12 @@ README:143 and README:326. Do not leave the promises pointing at nothing:
 | CLI | Databricks CLI 1.15.0 in WSL Ubuntu 24.04, profile `movies` (PAT). Bundle engine `direct` |
 | Bundle state path | `/Workspace/Users/ra.escoto@slalom.com/.bundle/movies_app_bundle/dev` |
 | Lakebase instance | `movies-app-dev` (key `movies_db`), CU_1, PG 16, eu-west-1, port 5432, `sslmode=require`, native password login disabled. DNS changes on every recreate — on-platform it arrives via `PGHOST`/`valueFrom` (ADR-005); locally resolve with `get_database_instance(...).read_write_dns` |
-| Lakebase database / schema | `movies` / `movies` |
+| Lakebase database / schema | `movies_dev` / `movies` |
 | UC catalog for Lakebase | `movies_app_dev` → `https://dbc-66830d2c-97a4.cloud.databricks.com/explore/data/movies_app_dev?o=2485046985091381` |
 | Analytics catalog.schema (Delta) | `movies_analytics_dev.movies` |
 | SQL warehouse | `movies_analytics`, id `50b70f5e18138968` (key `movies_analytics_warehouse`; serverless PRO, 2X-Small, auto-stop 20 min) |
-| App name / URL | `movies-app` · `https://movies-app-2485046985091381.aws.databricksapps.com` |
-| App SP client id | `2a26812a-1b82-4879-9487-6eb43f7ad56b` |
+| App name / URL | `movies-app-dev` · `https://movies-app-dev-2485046985091381.aws.databricksapps.com` |
+| App SP client id | `010ae2f6-6206-498c-a005-17daf4850a48` |
 | Interview date | TODO |
 
 ---

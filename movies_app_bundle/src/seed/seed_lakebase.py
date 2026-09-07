@@ -39,7 +39,7 @@ from databricks.sdk import WorkspaceClient
 from psycopg import sql
 
 INSTANCE = os.environ.get("LAKEBASE_INSTANCE", "movies-app-dev")
-DATABASE = os.environ.get("LAKEBASE_DATABASE", "movies")
+DATABASE = os.environ.get("LAKEBASE_DATABASE", "movies_dev")
 SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "movies")
 
 DDL_PATH = Path(__file__).resolve().parent / "ddl.sql"

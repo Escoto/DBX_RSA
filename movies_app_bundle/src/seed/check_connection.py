@@ -19,7 +19,7 @@ import psycopg
 from databricks.sdk import WorkspaceClient
 
 INSTANCE = os.environ.get("LAKEBASE_INSTANCE", "movies-app-dev")
-DATABASE = os.environ.get("LAKEBASE_DATABASE", "movies")
+DATABASE = os.environ.get("LAKEBASE_DATABASE", "movies_dev")
 
 
 def postgres_identity(w: WorkspaceClient) -> str:

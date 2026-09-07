@@ -3,15 +3,10 @@
 # -r requirements.txt`, then `npm run build` (root package.json), which builds the
 # Vue SPA into frontend/dist. So the command only has to start the server; it
 # reads DATABRICKS_APP_PORT in backend/config.py. See docs/DECISIONS.md ADR-004.
+#
+# Env vars are intentionally NOT declared here. They are injected at deploy
+# time from resources/app.yml's `apps.movies_app.config.env`, which is
+# bundle-variable-templated (unlike this static file) and overrides whatever
+# is listed here. Keeping this file free of env values means a rename or a
+# new target never requires hand-editing app.yaml.
 command: ["python", "-m", "backend.serve"]
-env:
-  - name: LAKEBASE_INSTANCE
-    value: movies-app-dev        # must equal var.lakebase_instance_name
-  - name: LAKEBASE_DATABASE
-    value: movies                # must equal var.lakebase_database
-  - name: LAKEBASE_SCHEMA
-    value: movies
-  - name: PGHOST
-    valueFrom: lakebase
-  - name: DATABRICKS_WAREHOUSE_ID
-    valueFrom: sql-warehouse

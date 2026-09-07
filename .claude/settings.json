@@ -7,8 +7,6 @@
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "eu.anthropic.claude-sonnet-4-6",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
   },
-  "model": "opus",
-  
   "permissions": {
     "allow": [
       "Grep",
@@ -19,5 +17,9 @@
       "Bash(git commit *)",
       "Bash(git push *)"
     ]
+  },
+  "model": "opus",
+  "enabledPlugins": {
+    "databricks@claude-plugins-official": true
   }
 }

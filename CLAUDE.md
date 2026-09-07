@@ -31,7 +31,7 @@ one), seed fake data, no real payments or auth, state assumptions where the
 prompt is vague, stub what cannot run on-platform and explain how it would map.
 Evaluation: "a builder who ships, thinks in trade-offs, and can defend a design".
 
-**Time budget:** 4–6 focused hours. Interview date: TODO.
+**Time budget:** 4–6 focused hours. **Interview: Wednesday 2026-09-09** (live demo).
 
 ---
 
@@ -47,7 +47,7 @@ Evaluation: "a builder who ships, thinks in trade-offs, and can defend a design"
 | Analytics catalog `movies_analytics_dev` | `catalogs.movies_analytics` | `resources/lakehouse.yml` |
 | Analytics schema `movies_analytics_dev.movies` | `schemas.movies` | `resources/lakehouse.yml` |
 | SQL warehouse `movies_analytics` | `sql_warehouses.movies_analytics_warehouse` | `resources/lakehouse.yml` |
-| App `movies-app` | `apps.movies_app` | `resources/app.yml` |
+| App `movies-app-dev` | `apps.movies_app` | `resources/app.yml` |
 
 **Phases 1–5 complete.** App resource + FastAPI skeleton; `src/seed/ddl.sql`
 (7 tables, 8 FKs of which 3 composite, 5 unique constraints, 11 checks) and
@@ -61,7 +61,8 @@ is verified **on the deployed app**, and bookings are visible in
 Phase 5 also resolved the deployed app's 500s on every `/api/*` call touching
 Lakebase. Root cause (ADR-005): the platform does **not** inject `PGHOST`, so
 `db.py` fell back to `get_database_instance()` over the workspace API, which
-the app SP cannot call. Fix: `PGHOST` with `valueFrom: lakebase` in `app.yaml`,
+the app SP cannot call. Fix: `PGHOST` via `value_from: lakebase` (now declared
+in `resources/app.yml` under `apps.movies_app.config.env`),
 plus a psycopg 3 connection-leak fix, `PGPASSWORD` support, step-by-step
 `/api/health` diagnostics, and a global exception handler. Connection pooling
 followed (ADR-006), which required turning every `/api` handler from
@@ -69,24 +70,37 @@ followed (ADR-006), which required turning every `/api` handler from
 
 **Phase 6 in progress.** Repository review; the pytest suite went from 7 to 107
 cases (routers, app shell, `/api/health`, `db.py`, pool backpressure) with
-`pytest.ini` and a `make test` target; a real bug fixed (the SPA 404 handler
+`pytest.ini` and a `make test` target (108 after B7/B13/B16 follow-ups); a real
+bug fixed (the SPA 404 handler
 was discarding the routers' 404 details); ADR-006 rewritten after shipping
 literal control characters; ADR-007 records cancellation as cut; ADR-008
 closes ADR-006 Deferred item 5 — the API threadpool is now sized from
 `pg_pool_max` rather than anyio's default, and a saturated pool returns `503`
 + `Retry-After` instead of a `500`.
 
-**Not built:** `analytics_job` + `src/analytics/gold.sql`, `docs/DEMO_SCRIPT.md`
-(with `docs/img/` screenshots), and `docs/ARCHITECTURE.md` /
-`docs/SCALE_TO_MILLIONS.md` — most of whose content already lives in
-`README.md`; decide whether to write the files or drop the promises at
-README:143 and README:326.
+**Not built:** `analytics_job` + `src/analytics/gold.sql`, and
+`docs/DEMO_SCRIPT.md` (with `docs/img/` screenshots).
+`docs/ARCHITECTURE.md` / `docs/SCALE_TO_MILLIONS.md` were **dropped** on
+2026-09-07: the README already carries the diagram, the service-choice table
+and the scale prose, and its "still to be written" pointers were removed rather
+than left aimed at files nobody was going to write before the demo.
 
-**Two demo traps.** (1) Seeded showtime ids are `now`-relative and
-`/api/showtimes` filters `starts_at > now()`, so the schedule shrinks daily and
-is **empty seven days after the last seed** — always re-seed with `--reset`
-before the demo. (2) Both the Lakebase instance and the app compute are stopped
-between sessions; start both ≥15 min ahead.
+**Demo pre-flight — Wednesday 2026-09-09.** The seed of 2026-09-07 covers
+2026-09-07 → 2026-09-13, so the 9th is inside the window and nothing expires
+before the demo. Still do this on the morning:
+
+1. Re-seed with `--reset` (showtime ids are `now`-relative and
+   `/api/showtimes` filters `starts_at > now()`, so the window shrinks daily
+   and empties seven days after the last seed; `--reset` also clears test
+   bookings so the seat map looks deliberate).
+2. Start the Lakebase instance and the app compute ≥15 min ahead — both are
+   stopped between sessions.
+3. Confirm `/api/health` reports `db: connected`.
+
+Also redeploy if anything is committed after the last `bundle run`: as of
+2026-09-07 the deployed app was one commit behind (`af3c891`, the timezone
+fix). Harmless — the frontend never sends `?date=` — but do not demo a build
+that is not the repo.
 
 ### Hazards (live)
 
@@ -145,7 +159,7 @@ Browser ──HTTPS──▶ Databricks App "movies-app" (FastAPI, $DATABRICKS_A
                      └── /api/*   → routers → services → psycopg
                                         │ OAuth token (app SP), sslmode=require
                                         ▼
-                          Lakebase "movies-app-dev" · db movies · schema movies
+                          Lakebase "movies-app-dev" · db movies_dev · schema movies
                                         │ registered as a UC catalog
                                         ▼
                           UC: movies_app_dev.movies.*   ← Catalog Explorer, warehouse movies_analytics
@@ -291,9 +305,9 @@ running `src/analytics/gold.sql`
 The panel-facing tree is in `README.md`. What matters for editing:
 
 ```
-docs/            DATA_MODEL.md, DECISIONS.md (ADR-001..007), AI_USAGE_LOG.md exist;
-                 DEMO_SCRIPT.md to write; ARCHITECTURE.md / SCALE_TO_MILLIONS.md
-                 to write or to drop from the README's promises (§9)
+docs/            DATA_MODEL.md, DECISIONS.md (ADR-001..008), AI_USAGE_LOG.md exist;
+                 DEMO_SCRIPT.md to write. ARCHITECTURE.md / SCALE_TO_MILLIONS.md
+                 dropped 2026-09-07 — the README carries that content (§9)
 .claude/         settings.json (git denied), agents/databricks-engineer/, commands/build-check.md
 movies_app_bundle/
 ├── databricks.yml           engine: direct, variables, target
@@ -304,7 +318,7 @@ movies_app_bundle/
     ├── app.yaml, package.json, requirements.txt, requirements-dev.txt, Makefile
     ├── backend/  (§4.2)     frontend/  Vue 3 + Vite + TS
     ├── pytest.ini           testpaths, pythonpath; `make test` is the gate
-    └── tests/               107 cases. Only backend.db is stubbed, so they need
+    └── tests/               108 cases. Only backend.db is stubbed, so they need
                              no credentials and pass with Lakebase stopped
 ```
 
@@ -322,9 +336,8 @@ done-check passes.
    architecture the README already describes.
 2. `docs/DEMO_SCRIPT.md`, with the re-seed and the two compute starts as step
    zero, plus `docs/img/` screenshots as the offline backup.
-3. Decide `docs/ARCHITECTURE.md` / `docs/SCALE_TO_MILLIONS.md`: write them, or
-   drop the "still to be written" promises at README:143 and README:326. Most
-   of that content is already in the README.
+3. ~~`docs/ARCHITECTURE.md` / `docs/SCALE_TO_MILLIONS.md`~~ — dropped
+   2026-09-07; the content lives in the README and the promises were removed.
 
 *Done-check:* `bundle run analytics_job` succeeds and both gold tables have
 rows; a cold reader can follow `DEMO_SCRIPT.md` to a booking without asking a
@@ -360,7 +373,7 @@ databricks bundle run analytics_job -t dev     # Phase 6
 databricks database get-database-instance movies-app-dev -p movies   # state, read_write_dns
 databricks database generate-database-credential -p movies --json '{"instance_names":["movies-app-dev"]}'
 
-databricks apps get movies-app -p movies       # URL, status, service_principal_client_id
+databricks apps get movies-app-dev -p movies   # URL, status, service_principal_client_id
 # runtime logs: Databricks UI → Compute → Apps → movies-app → Logs
 ```
 
@@ -437,20 +450,11 @@ To write:
   expires), start the Lakebase instance and the app compute ≥15 min ahead, then
   confirm `/api/health` reports `db: connected`.
 
-To write *or* to drop — the README already carries most of both, so the choice
-is to expand them into files or to delete the "still to be written" promises at
-README:143 and README:326. Do not leave the promises pointing at nothing:
-
-- **`ARCHITECTURE.md`** — one mermaid diagram (browser → app → Lakebase → UC →
-  Delta) and one table of Databricks services chosen vs alternatives (Apps vs
-  external hosting; Lakebase vs Delta-on-warehouse for OLTP; UC registration vs
-  ETL; sql_task vs Lakeflow Declarative Pipeline; DAB direct engine).
-  README §Architecture already has the diagram and the table.
-- **`SCALE_TO_MILLIONS.md`** — one page. Lakebase capacity (CU_2→CU_8, readable
-  secondaries, child instances), seat holds with TTL, idempotency keys,
-  connection pooling, CDN + horizontal API scaling, synced tables, Lakeflow +
-  Delta for analytics, AI/BI dashboards, multi-region, system-table
-  observability. README §Taking it to millions already has the prose.
+**Dropped 2026-09-07:** `ARCHITECTURE.md` and `SCALE_TO_MILLIONS.md`. The
+README's §Architecture already carries the diagram and the services-vs-
+alternatives table, and §Taking it to millions carries the scale prose; the
+"still to be written" pointers were removed from the README rather than left
+aimed at files that would not exist by the demo.
 
 ---
 
@@ -468,7 +472,7 @@ README:143 and README:326. Do not leave the promises pointing at nothing:
 | SQL warehouse | `movies_analytics`, id `50b70f5e18138968` (key `movies_analytics_warehouse`; serverless PRO, 2X-Small, auto-stop 20 min) |
 | App name / URL | `movies-app-dev` · `https://movies-app-dev-2485046985091381.aws.databricksapps.com` |
 | App SP client id | `010ae2f6-6206-498c-a005-17daf4850a48` |
-| Interview date | TODO |
+| Interview date | **Wednesday 2026-09-09** |
 
 ---
 

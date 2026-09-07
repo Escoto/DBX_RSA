@@ -9,12 +9,12 @@ Bundles**.
 
 Built for the Databricks Resident Architect take-home exercise.
 
-> **Status (2026-09-06):** infrastructure is deployed by the bundle (Lakebase
-> instance, Unity Catalog registration, analytics catalog and schema, SQL
-> warehouse, Databricks App), the schema and seed data are loaded, and the
-> backend API and seat-map UI are complete — the full booking flow, including
-> the `409` on a raced seat, is verified against the live Lakebase. Remaining:
-> final verification of the deployed app on-platform, and the analytics job.
+> **Status (2026-09-07):** the app is deployed and running on Databricks Apps
+> over a live Lakebase instance registered in Unity Catalog. The full booking
+> flow — browse, pick a theater and showtime, choose seats on the map, book,
+> and the `409` on a seat lost to a race — is verified **on the deployed app**,
+> and the resulting rows are visible in Catalog Explorer. 108 backend tests
+> pass. Remaining: the bundle job that builds the Delta gold tables.
 
 ---
 
@@ -22,9 +22,9 @@ Built for the Databricks Resident Architect take-home exercise.
 
 | Item | Value |
 |------|-------|
-| Databricks App URL | `https://movies-app-2485046985091381.aws.databricksapps.com` |
+| Databricks App URL | `https://movies-app-dev-2485046985091381.aws.databricksapps.com` |
 | Workspace | `https://dbc-66830d2c-97a4.cloud.databricks.com` (Slalom) |
-| Lakebase instance | `movies-app-dev` (CU_1, Postgres 16), database `movies`, schema `movies` |
+| Lakebase instance | `movies-app-dev` (CU_1, Postgres 16), database `movies_dev`, schema `movies` |
 | Unity Catalog (transactional) | `movies_app_dev.movies` — the Lakebase database registered as a UC catalog |
 | Unity Catalog (analytics, Delta) | `movies_analytics_dev.movies` — catalog and schema deployed; gold tables are the pending `analytics_job` |
 | SQL warehouse | `movies_analytics` (serverless, 2X-Small) |
@@ -54,7 +54,7 @@ No login and no payment: both are explicitly out of scope for the exercise.
 
 ```
 ┌──────────┐  HTTPS  ┌──────────────────────────────────────────┐
-│ Browser  │ ──────▶ │ Databricks App  "movies-app"              │
+│ Browser  │ ──────▶ │ Databricks App  "movies-app-dev"          │
 │ (Vue 3)  │ ◀────── │  FastAPI                                  │
 └──────────┘         │   ├─ /            static SPA (frontend/dist)
                      │   └─ /api/*       routers → services      │
@@ -64,7 +64,7 @@ No login and no payment: both are explicitly out of scope for the exercise.
                                     ▼
                      ┌──────────────────────────────┐
                      │ Lakebase "movies-app-dev"     │  managed Postgres, CU_1
-                     │  db movies · schema movies    │  7 tables, enforced constraints
+                     │  db movies_dev · schema movies│  7 tables, enforced constraints
                      └──────────────┬───────────────┘
                                     │ registered as a UC catalog
                                     ▼
@@ -99,7 +99,7 @@ sequenceDiagram
     autonumber
     actor U as Browser
     participant L as Event loop (uvicorn, 1 thread)
-    participant T as Worker thread (1 of 40)
+    participant T as Worker thread (1 of 14)
     participant P as psycopg pool (min 2 / max 10)
     participant PG as Lakebase Postgres
 
@@ -118,7 +118,7 @@ sequenceDiagram
         PG-->>P: new connection
     end
     T->>PG: SELECT
-    Note over T,PG: only THIS thread blocks.<br/>the loop and 39 other threads run on
+    Note over T,PG: only THIS thread blocks.<br/>the loop and 13 other threads run on
     PG-->>T: rows
     T->>P: putconn, commit and check expiry
     T-->>L: return value
@@ -138,8 +138,15 @@ pooled (`psycopg_pool`, `PG_POOL_ENABLED`) with the OAuth token minted per
 connection at connect time, so the handshake in the second branch above is rare:
 a full browse-and-book session on the deployed app used three connections total.
 
+The threadpool is sized from the database pool rather than left at anyio's
+default of 40 (`API_THREAD_POOL_SIZE`, default `PG_POOL_MAX + 4`). Forty threads
+competing for ten connections would admit work the database cannot serve and
+park each thread for the full `PG_POOL_TIMEOUT`; sizing the two together means
+an admitted thread almost always finds a connection, and excess concurrency
+waits as a suspended coroutine instead. If the pool does saturate, the request
+gets a `503` with `Retry-After` — backpressure, not a server fault.
+
 Decision log with the full rationale for each of these: `docs/DECISIONS.md`.
-(An expanded `docs/ARCHITECTURE.md` is still to be written.)
 
 ---
 
@@ -184,7 +191,7 @@ Full notes: `docs/DATA_MODEL.md`.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/api/health` | liveness + a round-trip to Lakebase |
+| GET | `/api/health` | step-by-step credential/connection diagnostics, pool stats, and a round-trip to Lakebase |
 | GET | `/api/movies` | list movies |
 | GET | `/api/movies/{movie_id}` | movie detail |
 | GET | `/api/theaters` | list theaters |
@@ -192,9 +199,11 @@ Full notes: `docs/DATA_MODEL.md`.
 | GET | `/api/showtimes/{showtime_id}/seats` | seat map with per-seat price and `available` / `booked` status |
 | POST | `/api/bookings` | book seats → `201` booking, `409` with `taken_seat_ids`, `422` on validation |
 | GET | `/api/bookings/{booking_id}` | booking with seats |
-| DELETE | `/api/bookings/{booking_id}` | cancel (stretch) |
+| ~~DELETE~~ | ~~`/api/bookings/{booking_id}`~~ | not built — cancellation cut, see ADR-007 |
 
-Interactive docs are served by FastAPI at `/docs` on the running app.
+Any endpoint answers `503` with `Retry-After` if every pooled connection is
+busy (ADR-008). Interactive docs are served by FastAPI at `/docs` on the
+running app.
 
 ---
 
@@ -208,15 +217,16 @@ dbx-movies-app/
     ├── databricks.yml              variables, target, sync rules
     ├── resources/lakebase.yml      Lakebase instance + Unity Catalog registration
     ├── resources/lakehouse.yml     analytics catalog + schema + SQL warehouse
-    ├── resources/app.yml           Databricks App + lakebase / sql-warehouse resources
+    ├── resources/app.yml           Databricks App, its lakebase resource, and its env
     ├── src/seed/                   check_connection.py, ddl.sql, seed_lakebase.py
     └── movies_app/                 app source (source_code_path)
-        ├── app.yaml                command + env for Databricks Apps
+        ├── app.yaml                the start command (env comes from resources/app.yml)
         ├── package.json            build script that Databricks Apps runs at deploy → frontend/dist
-        ├── requirements.txt        requirements-dev.txt, Makefile
+        ├── requirements.txt        requirements-dev.txt, pytest.ini, Makefile
         ├── backend/                FastAPI
         ├── frontend/               Vue 3 + Vite + TS  →  frontend/dist
-        └── tests/                  pytest
+        └── tests/                  108 pytest cases; only backend.db is stubbed, so they
+                                    need no credentials (`make test`)
 ```
 
 ---
@@ -242,7 +252,7 @@ cd movies_app_bundle
 databricks bundle validate -t dev
 databricks bundle deploy   -t dev                           # Lakebase, UC registration, catalog, schema, warehouse, app; uploads the app source
 databricks bundle run movies_app -t dev                     # app deployment: npm install, pip install, npm run build (frontend → dist), start
-databricks apps get movies-app -p movies                    # note url + service_principal_client_id
+databricks apps get movies-app-dev -p movies                # note url + service_principal_client_id
 pip install "psycopg[binary]" databricks-sdk
 DATABRICKS_CONFIG_PROFILE=movies python src/seed/seed_lakebase.py --app-sp-client-id <client-id>
 ```
@@ -259,7 +269,7 @@ To pause the database between sessions set `stopped: true` in
 ```bash
 cd movies_app_bundle/movies_app
 python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-export DATABRICKS_CONFIG_PROFILE=movies LAKEBASE_INSTANCE=movies-app-dev LAKEBASE_DATABASE=movies LAKEBASE_SCHEMA=movies
+export DATABRICKS_CONFIG_PROFILE=movies LAKEBASE_INSTANCE=movies-app-dev LAKEBASE_DATABASE=movies_dev LAKEBASE_SCHEMA=movies
 python -m backend.serve                            # http://localhost:8000
 # second terminal
 cd frontend && npm install && npm run dev          # http://localhost:5173, proxies /api → :8000
@@ -279,11 +289,11 @@ service principal. Same code path.
 | Payments | None; a booking is confirmed immediately |
 | Pricing | Per showtime: `standard` and `premium` prices; `accessible` seats are priced as standard |
 | Seat holds | No temporary holds or timers; the booking transaction is the reservation |
-| Cancellations | Stretch feature only (`DELETE /api/bookings/{id}`) |
+| Cancellations | Cut (ADR-007). The schema supports it — `status`, `cancelled_at`, and a cascade that frees the seats — but no endpoint ships |
 | Theaters | Several theaters, each with one or two auditoriums; one auditorium per showtime |
 | Currency / time | USD; timestamps stored and shown in UTC |
 | Environments | One `dev` target for the exercise; staging/prod would add a service principal deployer and a `mode: production` target |
-| Data | Seeded, deterministic fake data (movies, theaters, showtimes over the next 7 days) |
+| Data | Seeded, deterministic fake data. Showtimes are generated relative to the seed run, covering the next 7 days, so re-run `seed_lakebase.py --reset` to roll the window forward |
 
 ---
 
@@ -322,9 +332,6 @@ layer.
 - **Operations**: Unity Catalog audit logs and system tables for observability,
   multi-region deployment with regional Lakebase instances, bundles promoted
   through dev → staging → prod by a service principal.
-
-A one-page version with a diagram (`docs/SCALE_TO_MILLIONS.md`) is still to be
-written.
 
 ---
 

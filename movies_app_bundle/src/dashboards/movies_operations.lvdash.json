@@ -1,0 +1,1392 @@
+{
+  "datasets": [
+    {
+      "name": "ds_live_kpi",
+      "displayName": "Live KPIs (next 24h)",
+      "queryLines": [
+        "WITH shows AS (\n",
+        "  SELECT st.showtime_id,\n",
+        "         a.row_count * a.seats_per_row AS capacity,\n",
+        "         count(bs.seat_id) AS sold\n",
+        "  FROM movies_app_dev.movies.showtimes st\n",
+        "  JOIN movies_app_dev.movies.auditoriums a ON a.auditorium_id = st.auditorium_id\n",
+        "  LEFT JOIN movies_app_dev.movies.booking_seats bs ON bs.showtime_id = st.showtime_id\n",
+        "  WHERE st.starts_at >= current_timestamp()\n",
+        "    AND st.starts_at < current_timestamp() + INTERVAL 24 HOURS\n",
+        "  GROUP BY st.showtime_id, a.row_count, a.seats_per_row\n",
+        ")\n",
+        "SELECT count(*) AS shows_next_24h,\n",
+        "       sum(sold) AS seats_sold,\n",
+        "       sum(capacity) - sum(sold) AS seats_free,\n",
+        "       round(100.0 * sum(sold) / nullif(sum(capacity), 0), 1) AS occupancy_pct\n",
+        "FROM shows"
+      ]
+    },
+    {
+      "name": "ds_live_by_theater",
+      "displayName": "Live occupancy by theater",
+      "queryLines": [
+        "-- Capacity is per showtime, so it has to be collapsed before the theater\n",
+        "-- roll-up: joining booking_seats fans the showtime row out once per seat.\n",
+        "WITH shows AS (\n",
+        "  SELECT st.showtime_id,\n",
+        "         a.theater_id,\n",
+        "         max(a.row_count * a.seats_per_row) AS capacity,\n",
+        "         count(bs.seat_id) AS sold\n",
+        "  FROM movies_app_dev.movies.showtimes st\n",
+        "  JOIN movies_app_dev.movies.auditoriums a ON a.auditorium_id = st.auditorium_id\n",
+        "  LEFT JOIN movies_app_dev.movies.booking_seats bs ON bs.showtime_id = st.showtime_id\n",
+        "  WHERE st.starts_at >= current_timestamp()\n",
+        "    AND st.starts_at < current_timestamp() + INTERVAL 24 HOURS\n",
+        "  GROUP BY st.showtime_id, a.theater_id\n",
+        ")\n",
+        "SELECT t.name AS theater,\n",
+        "       t.city AS city,\n",
+        "       count(*) AS shows,\n",
+        "       sum(s.sold) AS seats_sold,\n",
+        "       round(100.0 * sum(s.sold) / nullif(sum(s.capacity), 0), 1) AS occupancy_pct\n",
+        "FROM shows s\n",
+        "JOIN movies_app_dev.movies.theaters t ON t.theater_id = s.theater_id\n",
+        "GROUP BY t.name, t.city\n",
+        "ORDER BY occupancy_pct DESC"
+      ]
+    },
+    {
+      "name": "ds_live_filling",
+      "displayName": "Filling up now",
+      "queryLines": [
+        "SELECT st.starts_at,\n",
+        "       m.title AS movie,\n",
+        "       t.name AS theater,\n",
+        "       a.name AS auditorium,\n",
+        "       count(bs.seat_id) AS seats_sold,\n",
+        "       max(a.row_count * a.seats_per_row) AS capacity,\n",
+        "       round(100.0 * count(bs.seat_id) / max(a.row_count * a.seats_per_row), 1) AS occupancy_pct\n",
+        "FROM movies_app_dev.movies.showtimes st\n",
+        "JOIN movies_app_dev.movies.movies m ON m.movie_id = st.movie_id\n",
+        "JOIN movies_app_dev.movies.auditoriums a ON a.auditorium_id = st.auditorium_id\n",
+        "JOIN movies_app_dev.movies.theaters t ON t.theater_id = a.theater_id\n",
+        "LEFT JOIN movies_app_dev.movies.booking_seats bs ON bs.showtime_id = st.showtime_id\n",
+        "WHERE st.starts_at >= current_timestamp()\n",
+        "GROUP BY st.starts_at, m.title, t.name, a.name\n",
+        "ORDER BY st.starts_at\n",
+        "LIMIT 12"
+      ]
+    },
+    {
+      "name": "ds_open_slots",
+      "displayName": "Room and slot availability",
+      "queryLines": [
+        "WITH slots AS (\n",
+        "  SELECT * FROM VALUES (11, 'matinee'), (15, 'afternoon'), (19, 'evening'), (22, 'late')\n",
+        "  AS s(slot_hour, time_slot)\n",
+        "),\n",
+        "rooms AS (\n",
+        "  SELECT a.auditorium_id, a.name AS auditorium, t.name AS theater, t.city\n",
+        "  FROM movies_app_dev.movies.auditoriums a\n",
+        "  JOIN movies_app_dev.movies.theaters t ON t.theater_id = a.theater_id\n",
+        "),\n",
+        "scheduled AS (\n",
+        "  SELECT st.auditorium_id, hour(st.starts_at) AS slot_hour, count(*) AS shows\n",
+        "  FROM movies_app_dev.movies.showtimes st\n",
+        "  WHERE st.starts_at >= current_timestamp()\n",
+        "  GROUP BY st.auditorium_id, hour(st.starts_at)\n",
+        ")\n",
+        "SELECT r.theater, r.city, r.auditorium, s.time_slot,\n",
+        "       coalesce(sc.shows, 0) AS shows_next_7d,\n",
+        "       CASE WHEN coalesce(sc.shows, 0) = 0 THEN 'FREE' ELSE 'in use' END AS status\n",
+        "FROM rooms r\n",
+        "CROSS JOIN slots s\n",
+        "LEFT JOIN scheduled sc ON sc.auditorium_id = r.auditorium_id AND sc.slot_hour = s.slot_hour\n",
+        "ORDER BY status, r.theater, s.slot_hour"
+      ]
+    },
+    {
+      "name": "ds_gold_kpi",
+      "displayName": "Settled totals",
+      "queryLines": [
+        "SELECT sum(revenue) AS revenue,\n",
+        "       sum(seats_sold) AS seats_sold,\n",
+        "       round(100.0 * sum(seats_sold) / nullif(sum(seats_offered), 0), 1) AS occupancy_pct,\n",
+        "       sum(sellouts) AS sellouts\n",
+        "FROM movies_analytics_dev.movies.demand_by_movie_theater_slot"
+      ]
+    },
+    {
+      "name": "ds_demand_rank",
+      "displayName": "Demand by movie, theater and slot",
+      "queryLines": [
+        "SELECT concat(title, ' · ', time_slot) AS movie_slot,\n",
+        "       theater_name,\n",
+        "       occupancy_pct,\n",
+        "       sellout_rate,\n",
+        "       showtimes_offered\n",
+        "FROM movies_analytics_dev.movies.demand_by_movie_theater_slot\n",
+        "WHERE showtimes_offered >= 3\n",
+        "ORDER BY occupancy_pct DESC\n",
+        "LIMIT 12"
+      ]
+    },
+    {
+      "name": "ds_expansion",
+      "displayName": "Candidates for more showings",
+      "queryLines": [
+        "SELECT title, theater_name, city, time_slot,\n",
+        "       showtimes_offered, occupancy_pct, sellout_rate, revenue_per_showtime\n",
+        "FROM movies_analytics_dev.movies.demand_by_movie_theater_slot\n",
+        "WHERE showtimes_offered >= 3 AND occupancy_pct >= 70\n",
+        "ORDER BY occupancy_pct DESC"
+      ]
+    },
+    {
+      "name": "ds_movie_rank",
+      "displayName": "Sell-through by movie",
+      "queryLines": [
+        "SELECT title,\n",
+        "       round(100.0 * sum(seats_sold) / nullif(sum(seats_offered), 0), 1) AS occupancy_pct,\n",
+        "       sum(revenue) AS revenue,\n",
+        "       sum(showtimes_offered) AS shows\n",
+        "FROM movies_analytics_dev.movies.demand_by_movie_theater_slot\n",
+        "GROUP BY title\n",
+        "ORDER BY occupancy_pct DESC"
+      ]
+    },
+    {
+      "name": "ds_revenue_trend",
+      "displayName": "Revenue by show date",
+      "queryLines": [
+        "SELECT show_date, theater_name, revenue, occupancy_pct\n",
+        "FROM movies_analytics_dev.movies.revenue_by_day\n",
+        "WHERE show_date < current_date()\n",
+        "ORDER BY show_date"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "pg_live",
+      "displayName": "Live operations",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "w_live_header",
+            "textbox_spec": "## Now selling\nRead live from the Lakebase OLTP tables through their Unity Catalog registration — no ETL, no copy. A seat booked in the app shows up here on the next refresh."
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "w_kpi_shows",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_live_kpi",
+                  "fields": [
+                    {
+                      "name": "shows_next_24h",
+                      "expression": "`shows_next_24h`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "shows_next_24h",
+                  "displayName": "Showtimes"
+                }
+              },
+              "frame": {
+                "title": "Showtimes in the next 24h",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "w_kpi_sold",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_live_kpi",
+                  "fields": [
+                    {
+                      "name": "seats_sold",
+                      "expression": "`seats_sold`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "seats_sold",
+                  "displayName": "Seats sold"
+                }
+              },
+              "frame": {
+                "title": "Seats sold, next 24h",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "w_kpi_occupancy",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_live_kpi",
+                  "fields": [
+                    {
+                      "name": "occupancy_pct",
+                      "expression": "`occupancy_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "occupancy_pct",
+                  "displayName": "Occupancy %"
+                }
+              },
+              "frame": {
+                "title": "Occupancy, next 24h",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "w_live_theater",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_live_by_theater",
+                  "fields": [
+                    {
+                      "name": "theater",
+                      "expression": "`theater`"
+                    },
+                    {
+                      "name": "occupancy_pct",
+                      "expression": "`occupancy_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "theater",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Theater",
+                  "axis": {
+                    "title": "Theater"
+                  }
+                },
+                "y": {
+                  "fieldName": "occupancy_pct",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Occupancy %",
+                  "axis": {
+                    "title": "Occupancy %"
+                  }
+                }
+              },
+              "frame": {
+                "title": "How full the next 24h is, by theater",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "w_live_filling",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_live_filling",
+                  "fields": [
+                    {
+                      "name": "starts_at",
+                      "expression": "`starts_at`"
+                    },
+                    {
+                      "name": "movie",
+                      "expression": "`movie`"
+                    },
+                    {
+                      "name": "theater",
+                      "expression": "`theater`"
+                    },
+                    {
+                      "name": "seats_sold",
+                      "expression": "`seats_sold`"
+                    },
+                    {
+                      "name": "capacity",
+                      "expression": "`capacity`"
+                    },
+                    {
+                      "name": "occupancy_pct",
+                      "expression": "`occupancy_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "starts_at",
+                    "displayName": "Starts (UTC)",
+                    "title": "Starts (UTC)",
+                    "type": "datetime",
+                    "displayAs": "datetime",
+                    "order": 0,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "movie",
+                    "displayName": "Movie",
+                    "title": "Movie",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 1,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "theater",
+                    "displayName": "Theater",
+                    "title": "Theater",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 2,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "seats_sold",
+                    "displayName": "Sold",
+                    "title": "Sold",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "order": 3,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0"
+                  },
+                  {
+                    "fieldName": "capacity",
+                    "displayName": "Seats",
+                    "title": "Seats",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "order": 4,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0"
+                  },
+                  {
+                    "fieldName": "occupancy_pct",
+                    "displayName": "Full %",
+                    "title": "Full %",
+                    "type": "float",
+                    "displayAs": "number",
+                    "order": 5,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.0"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "The next showtimes, filling up",
+                "showTitle": true
+              },
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "invisibleColumns": []
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 5,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "w_open_slots",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_open_slots",
+                  "fields": [
+                    {
+                      "name": "theater",
+                      "expression": "`theater`"
+                    },
+                    {
+                      "name": "city",
+                      "expression": "`city`"
+                    },
+                    {
+                      "name": "auditorium",
+                      "expression": "`auditorium`"
+                    },
+                    {
+                      "name": "time_slot",
+                      "expression": "`time_slot`"
+                    },
+                    {
+                      "name": "shows_next_7d",
+                      "expression": "`shows_next_7d`"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "status",
+                    "displayName": "Slot",
+                    "title": "Slot",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 0,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "theater",
+                    "displayName": "Theater",
+                    "title": "Theater",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 1,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "city",
+                    "displayName": "City",
+                    "title": "City",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 2,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "auditorium",
+                    "displayName": "Auditorium",
+                    "title": "Auditorium",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 3,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "time_slot",
+                    "displayName": "Time slot",
+                    "title": "Time slot",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 4,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "shows_next_7d",
+                    "displayName": "Shows scheduled",
+                    "title": "Shows scheduled",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "order": 5,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Where a new showing could physically go (FREE = the room runs nothing in that slot)",
+                "showTitle": true
+              },
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "invisibleColumns": []
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 11,
+            "width": 6,
+            "height": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "pg_demand",
+      "displayName": "Demand & programming",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "w_demand_header",
+            "textbox_spec": "## Where the demand is\nBuilt from the Delta gold tables in `movies_analytics_dev.movies`, over **settled** showtimes only — shows that have already played. Forward bookings are still filling and would understate demand."
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "w_gold_revenue",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_gold_kpi",
+                  "fields": [
+                    {
+                      "name": "revenue",
+                      "expression": "`revenue`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "revenue",
+                  "displayName": "Revenue"
+                }
+              },
+              "frame": {
+                "title": "Revenue, settled shows (USD)",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "w_gold_occupancy",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_gold_kpi",
+                  "fields": [
+                    {
+                      "name": "occupancy_pct",
+                      "expression": "`occupancy_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "occupancy_pct",
+                  "displayName": "Occupancy %"
+                }
+              },
+              "frame": {
+                "title": "Average occupancy",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "w_gold_sellouts",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_gold_kpi",
+                  "fields": [
+                    {
+                      "name": "sellouts",
+                      "expression": "`sellouts`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sellouts",
+                  "displayName": "Sellouts"
+                }
+              },
+              "frame": {
+                "title": "Shows that sold out",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "w_demand_rank",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_demand_rank",
+                  "fields": [
+                    {
+                      "name": "movie_slot",
+                      "expression": "`movie_slot`"
+                    },
+                    {
+                      "name": "occupancy_pct",
+                      "expression": "`occupancy_pct`"
+                    },
+                    {
+                      "name": "theater_name",
+                      "expression": "`theater_name`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "occupancy_pct",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Occupancy %",
+                  "axis": {
+                    "title": "Occupancy %"
+                  }
+                },
+                "y": {
+                  "fieldName": "movie_slot",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Movie and slot",
+                  "axis": {
+                    "title": ""
+                  }
+                },
+                "color": {
+                  "fieldName": "theater_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Theater"
+                }
+              },
+              "frame": {
+                "title": "Top demand: movie × theater × slot (settled shows, min 3 showings)",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "w_expansion",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_expansion",
+                  "fields": [
+                    {
+                      "name": "title",
+                      "expression": "`title`"
+                    },
+                    {
+                      "name": "theater_name",
+                      "expression": "`theater_name`"
+                    },
+                    {
+                      "name": "time_slot",
+                      "expression": "`time_slot`"
+                    },
+                    {
+                      "name": "showtimes_offered",
+                      "expression": "`showtimes_offered`"
+                    },
+                    {
+                      "name": "occupancy_pct",
+                      "expression": "`occupancy_pct`"
+                    },
+                    {
+                      "name": "sellout_rate",
+                      "expression": "`sellout_rate`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "title",
+                    "displayName": "Movie",
+                    "title": "Movie",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 0,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "theater_name",
+                    "displayName": "Theater",
+                    "title": "Theater",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 1,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "time_slot",
+                    "displayName": "Slot",
+                    "title": "Slot",
+                    "type": "string",
+                    "displayAs": "string",
+                    "order": 2,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true
+                  },
+                  {
+                    "fieldName": "showtimes_offered",
+                    "displayName": "Shows",
+                    "title": "Shows",
+                    "type": "integer",
+                    "displayAs": "number",
+                    "order": 3,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0"
+                  },
+                  {
+                    "fieldName": "occupancy_pct",
+                    "displayName": "Full %",
+                    "title": "Full %",
+                    "type": "float",
+                    "displayAs": "number",
+                    "order": 4,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.0"
+                  },
+                  {
+                    "fieldName": "sellout_rate",
+                    "displayName": "Sellout %",
+                    "title": "Sellout %",
+                    "type": "float",
+                    "displayAs": "number",
+                    "order": 5,
+                    "visible": true,
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "numberFormat": "0.0"
+                  }
+                ]
+              },
+              "frame": {
+                "title": "Candidates for more showings (≥70% full)",
+                "showTitle": true
+              },
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 25,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "invisibleColumns": []
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "w_movie_rank",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_movie_rank",
+                  "fields": [
+                    {
+                      "name": "title",
+                      "expression": "`title`"
+                    },
+                    {
+                      "name": "occupancy_pct",
+                      "expression": "`occupancy_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "occupancy_pct",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Occupancy %",
+                  "axis": {
+                    "title": "Occupancy %"
+                  }
+                },
+                "y": {
+                  "fieldName": "title",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Movie",
+                  "axis": {
+                    "title": ""
+                  }
+                }
+              },
+              "frame": {
+                "title": "Sell-through by movie, all theaters",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 12,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "w_revenue_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ds_revenue_trend",
+                  "fields": [
+                    {
+                      "name": "show_date",
+                      "expression": "`show_date`"
+                    },
+                    {
+                      "name": "revenue",
+                      "expression": "`revenue`"
+                    },
+                    {
+                      "name": "theater_name",
+                      "expression": "`theater_name`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "show_date",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Show date",
+                  "axis": {
+                    "title": "Show date"
+                  }
+                },
+                "y": {
+                  "fieldName": "revenue",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Revenue",
+                  "axis": {
+                    "title": "Revenue (USD)"
+                  }
+                },
+                "color": {
+                  "fieldName": "theater_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Theater"
+                }
+              },
+              "frame": {
+                "title": "Revenue by show date and theater",
+                "showTitle": true
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 18,
+            "width": 6,
+            "height": 5
+          }
+        }
+      ]
+    }
+  ]
+}

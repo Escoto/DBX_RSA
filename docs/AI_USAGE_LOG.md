@@ -491,3 +491,84 @@ the *Deferred* table in ADR-006 with a reason each. Cancellation, now ADR-007.
 **Rough split:** ~85% AI (review, tests, mutation testing, doc repair), ~15%
 human (the triage that scoped this phase, the smoke test on the deployed app,
 the call to defer pooling and cut cancellation).
+
+## Phase 7 — Analytics: gold tables, AI/BI dashboard, Genie space (2026-09-07)
+
+**The human set the goal, in his own words:** a dashboard showing cinemas
+filling up live, and a Genie space that could answer *"where and for which
+movies should we open new functions based on popularity?"* Two decisions were
+put back to him before any code was written — whether to backfill history, and
+how far to take the scope — and he chose the full build with 14 days of
+backfill.
+
+**AI checked the platform before proposing anything, and that changed the
+plan.** Three probes, in order: the CLI 1.15.0 bundle schema does carry
+`dashboards` and `genie_spaces` as first-class resources (so the whole layer
+could be code, not clicks); a serverless warehouse can read the UC-registered
+Lakebase catalog live (so "live" could mean federated, not a refresh cycle);
+and the workspace's warehouse id recorded in `CLAUDE.md` §10 did not exist any
+more. The third was a latent demo failure sitting in the handoff doc.
+
+**The finding that reframed the work.** Reading the seed generator rather than
+the dashboards: bookings were uniform noise on two days only — 132 seats over
+70 showtimes, 1.6% fill, flat across every movie, theater and slot. Both
+requested features would have been built on data with nothing in it. The
+dashboard would have shown empty rooms and Genie would have recommended
+whichever combination the RNG favoured. AI proposed reshaping the seed first
+and named it as the actual work; the human agreed. See ADR-009.
+
+**Generated:** the demand model and programming grid in `seed_lakebase.py`
+(popularity × slot × theater × weekend factors, a lead-time curve for
+unplayed shows, centre-out seat filling, backdated `created_at`); the nine
+dashboard datasets and eleven widgets in `movies_operations.lvdash.json`; the
+Genie instruction block; `resources/analytics_ui.yml`. The gold layer
+(`gold.sql`, `analytics_job.yml`) was delegated to the `databricks-engineer`
+subagent with a written column spec, per CLAUDE.md §11.
+
+**Two undocumented formats were learned by probing the API rather than
+guessing.** The Genie v2 export rejects, one deploy at a time, an unsorted
+`data_sources.tables`, an unsorted `text_instructions`, and more than one
+instruction item; it has no field at all for sample questions or example SQL.
+The Lakeview API, by contrast, validates nothing — it accepted
+`"widgetType": "flurb"` with a `200`. That asymmetry set the verification
+strategy: for Genie, deploy and ask it the real question; for the dashboard,
+execute all nine datasets against the warehouse and cross-check every widget
+field reference against the returned columns, because a green deploy means
+nothing.
+
+**Verified, with numbers.** Seed: 357 showtimes, 6,597 bookings, 15,526 sold
+seats; settled shows 42.8% full, upcoming 22.4%; no upcoming show sold out
+(fullest has 20 free seats, so the demo can always book). Gold: 357 / 19 / 63
+rows, every table and column commented. Genie, asked the human's question
+verbatim through `genie start-conversation`, produced the canonical query from
+its instructions and answered with movie + theater + slot + sample size +
+revenue per showtime.
+
+**The verification that was itself wrong.** AI declared the dashboard's SQL
+verified and flagged only its visual specs as unchecked. The human opened it and
+every tile on both pages had failed — `movie_idJOIN`, `current_timestamp()GROUP
+BY`, and a `PARSE_EMPTY_STATEMENT` on the one dataset that began with a comment.
+Lakeview concatenates a dataset's `queryLines` with **no separator**; the
+verification script had joined them with `\n` before executing, so it tested SQL
+the runtime would never run and passed all nine. The bug and the check were
+wrong in the same direction, which is why the check could not catch it.
+
+Fixed by giving every line its own trailing newline, and by rewriting the
+verification to concatenate with `""` and apply the runtime's own
+`WITH q AS (...)` wrapper — executing character-for-character what the dashboard
+executes. Nine datasets, thirteen widgets, green under the corrected check, then
+redeployed. The lesson is recorded in ADR-009 rather than just the fix: a
+verification that reformats its input is not a verification, and the human's two
+minutes in a browser found in one glance what the automated check was built to
+miss.
+
+**What the human decided:** the scope and the backfill; that Genie's ranking
+should stay in instructions rather than being precomputed into a gold table
+(AI proposed this and the human's brief — "a builder who thinks in trade-offs"
+— is what it was weighed against); and the disclosure that the seed is shaped
+deliberately, which is now part of the demo narration.
+
+**Rough split:** ~85% AI (platform probing, the demand model, the two AI/BI
+definitions, verification tooling, ADR-009), ~15% human (the goal, the two
+scope decisions, and the judgement that a planted-but-disclosed signal is more
+defensible than uniform noise).

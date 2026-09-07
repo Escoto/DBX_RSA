@@ -4,10 +4,6 @@ resources:
       name: ${var.app_name}-${bundle.target}
       description: "Movie ticket booking prototype — FastAPI + Vue on Lakebase"
       source_code_path: ../movies_app
-      # Overrides movies_app/app.yaml's `env:` at deploy time. Bundle-variable
-      # templated (resource attribute refs, not re-derived strings), so a
-      # rename or a new target never requires hand-editing app.yaml. app.yaml
-      # keeps only the static `command`.
       config:
         env:
           - name: LAKEBASE_INSTANCE

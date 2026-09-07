@@ -1,0 +1,25 @@
+# The AI/BI layer: one dashboard and one Genie space, both deployed from the
+# bundle like every other resource.
+
+resources:
+  dashboards:
+    movies_operations:
+      display_name: Movies — live operations and demand
+      file_path: ../src/dashboards/movies_operations.lvdash.json
+      parent_path: ${workspace.resource_path}
+      warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
+      lifecycle:
+        prevent_destroy: false
+
+  genie_spaces:
+    movies_demand:
+      title: Movies — cinema demand
+      description: >-
+        Ask about how full the cinemas are, which titles are selling, and where
+        to schedule more showings. Reads the Materialized Views in
+        `movies_analytics_dev`.`movies`
+      file_path: ../src/genie/movies_demand.geniespace.json
+      parent_path: ${workspace.resource_path}
+      warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
+      lifecycle:
+        prevent_destroy: false

@@ -26,8 +26,10 @@ Built for the Databricks Resident Architect take-home exercise.
 | Workspace | `https://dbc-66830d2c-97a4.cloud.databricks.com` (Slalom) |
 | Lakebase instance | `movies-app-dev` (CU_1, Postgres 16), database `movies_dev`, schema `movies` |
 | Unity Catalog (transactional) | `movies_app_dev.movies` — the Lakebase database registered as a UC catalog |
-| Unity Catalog (analytics, Delta) | `movies_analytics_dev.movies` — catalog and schema deployed; gold tables are the pending `analytics_job` |
-| SQL warehouse | `movies_analytics` (serverless, 2X-Small) |
+| Unity Catalog (analytics, Delta) | `movies_analytics_dev.movies` — gold tables `showtime_occupancy`, `demand_by_movie_theater_slot`, `revenue_by_day`, built by `analytics_job` |
+| SQL warehouse | `movies_analytics` (serverless, 2X-Small), id `72704e9c199eb256` |
+| AI/BI dashboard | `Movies — live operations and demand` — live page federated into Lakebase, demand page on Delta |
+| Genie space | `Movies — cinema demand` — natural-language questions over the gold tables |
 | Tables | `movies`, `theaters`, `auditoriums`, `seats`, `showtimes`, `bookings`, `booking_seats` |
 | Bundle | `movies_app_bundle`, target `dev`, direct engine |
 | Code | this repository |
@@ -47,6 +49,21 @@ Built for the Databricks Resident Architect take-home exercise.
    seat ids — the database's unique constraint, not application code, rejects it.
 
 No login and no payment: both are explicitly out of scope for the exercise.
+
+And on the analytics side, in Databricks rather than in the app:
+
+7. Watch the auditoriums fill in an **AI/BI dashboard** whose live page queries
+   the Lakebase tables *through their Unity Catalog registration* — a seat
+   booked in the app shows up on the next refresh, with no pipeline in between.
+   Its second page reads the Delta gold tables for two weeks of settled demand.
+8. Ask a **Genie space** a programming question in plain language — *"where and
+   for which movies should we open new functions based on popularity?"* — and
+   get back movie, theater, time slot, sample size and revenue per showing.
+
+The seed data carries a deliberate demand distribution (popular titles, prime
+slots, weekend bumps, and two under-served gaps) rather than uniform noise, so
+those two surfaces have something real to find. The analytics layer discovers
+the signal; it is never told where it is. See ADR-009.
 
 ---
 
@@ -218,7 +235,12 @@ dbx-movies-app/
     ├── resources/lakebase.yml      Lakebase instance + Unity Catalog registration
     ├── resources/lakehouse.yml     analytics catalog + schema + SQL warehouse
     ├── resources/app.yml           Databricks App, its lakebase resource, and its env
+    ├── resources/analytics_job.yml sql_task job that rebuilds the Delta gold tables
+    ├── resources/analytics_ui.yml  AI/BI dashboard + Genie space
     ├── src/seed/                   check_connection.py, ddl.sql, seed_lakebase.py
+    ├── src/analytics/gold.sql      the three gold tables, with table/column comments
+    ├── src/dashboards/             movies_operations.lvdash.json  (9 datasets, 2 pages)
+    ├── src/genie/                  movies_demand.geniespace.json  (tables + instructions)
     └── movies_app/                 app source (source_code_path)
         ├── app.yaml                the start command (env comes from resources/app.yml)
         ├── package.json            build script that Databricks Apps runs at deploy → frontend/dist

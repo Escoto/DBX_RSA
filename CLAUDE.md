@@ -78,8 +78,33 @@ closes ADR-006 Deferred item 5 — the API threadpool is now sized from
 `pg_pool_max` rather than anyio's default, and a saturated pool returns `503`
 + `Retry-After` instead of a `500`.
 
-**Not built:** `analytics_job` + `src/analytics/gold.sql`, and
-`docs/DEMO_SCRIPT.md` (with `docs/img/` screenshots).
+**Phase 7 complete — the analytics layer (2026-09-07).** ADR-009. Three pieces,
+all deployed by the bundle and all verified on the platform:
+
+- **The seed carries a demand signal.** `seed_lakebase.py` was rewritten around
+  an explicit `PROGRAMMING` grid and a demand model (movie × slot × theater ×
+  weekend, a lead-time curve for unplayed shows, centre-out seat filling,
+  backdated `created_at`) over a 21-day window — 14 days of settled history
+  plus the 7 bookable days. 357 showtimes, 6,597 bookings, 15,526 sold seats;
+  settled shows 42.8% full, upcoming 22.4%. Two gaps in the grid are deliberate
+  and are what the Genie question discovers. The old seed booked uniform noise
+  on two days only (1.6% fill), which would have left both new surfaces with
+  nothing to find.
+- **Gold tables + `analytics_job`.** `src/analytics/gold.sql` builds
+  `showtime_occupancy` (357), `demand_by_movie_theater_slot` (19) and
+  `revenue_by_day` (63) in `movies_analytics_dev.movies`, every table and column
+  commented (Genie reads those comments). Catalog names come in as `sql_task`
+  parameters via `IDENTIFIER(:param)`; column comments need a second-pass
+  `ALTER TABLE` because `CREATE OR REPLACE TABLE ... AS SELECT` rejects an
+  inline column schema.
+- **Dashboard + Genie space, both as bundle resources** (`resources/analytics_ui.yml`).
+  The dashboard's "Live operations" page reads `movies_app_dev.movies` federated
+  through UC — a booking appears on refresh with no pipeline — while "Demand &
+  programming" reads the Delta gold tables. Genie reads only the gold tables.
+  Asked the demo question verbatim it produces the canonical query from its
+  instructions and answers with movie + theater + slot + sample size.
+
+**Not built:** `docs/DEMO_SCRIPT.md` (with `docs/img/` screenshots).
 `docs/ARCHITECTURE.md` / `docs/SCALE_TO_MILLIONS.md` were **dropped** on
 2026-09-07: the README already carries the diagram, the service-choice table
 and the scale prose, and its "still to be written" pointers were removed rather
@@ -93,9 +118,17 @@ before the demo. Still do this on the morning:
    `/api/showtimes` filters `starts_at > now()`, so the window shrinks daily
    and empties seven days after the last seed; `--reset` also clears test
    bookings so the seat map looks deliberate).
-2. Start the Lakebase instance and the app compute ≥15 min ahead — both are
-   stopped between sessions.
-3. Confirm `/api/health` reports `db: connected`.
+2. **Re-run `analytics_job` immediately after re-seeding.** The gold tables are
+   a snapshot: re-seeding moves every showtime and rewrites every booking, so
+   until the job runs again the dashboard's *Demand & programming* page and the
+   whole Genie space describe yesterday's window. The *Live operations* page is
+   federated and needs no rebuild.
+3. Start the Lakebase instance and the app compute ≥15 min ahead — both are
+   stopped between sessions — and the `movies_analytics` warehouse ≥5 min ahead
+   (serverless, ~20 s cold start, 20 min auto-stop). The dashboard's live tiles
+   need **both** Lakebase and the warehouse running.
+4. Confirm `/api/health` reports `db: connected`, and open the dashboard once so
+   the tiles are warm.
 
 Also redeploy if anything is committed after the last `bundle run`: as of
 2026-09-07 the deployed app was one commit behind (`af3c891`, the timezone
@@ -134,7 +167,10 @@ that is not the repo.
 | Serving | FastAPI serves `/api/*` **and** the SPA from `frontend/dist`; the SPA is built **on the Apps runtime at deploy time** (ADR-004) | One process, one app, no Node at runtime → predictable startup; no local build, so a stale `dist` cannot reach the platform |
 | **System of record** | **Lakebase** (managed Postgres), 7 tables with **enforced** PK/FK/UNIQUE/CHECK | Assigned-seat booking is OLTP: row locks, unique constraints, ms commits. Delta enforces no uniqueness and spans no multi-table transaction |
 | Governance | The Postgres database is **registered in Unity Catalog** as `movies_app_dev` | Browsable in Catalog Explorer, queryable from a warehouse — "real schema in UC" without ETL |
-| Analytics copy | Delta gold tables in `movies_analytics_dev.movies` built by a bundle job (`sql_task` on `movies_analytics`) reading the Lakebase catalog | Shows the lakehouse side without putting OLTP on Delta. Infra exists; the job is Phase 6 |
+| Analytics copy | Delta gold tables in `movies_analytics_dev.movies` built by a bundle job (`sql_task` on `movies_analytics`) reading the Lakebase catalog | Shows the lakehouse side without putting OLTP on Delta. Built in Phase 7 |
+| Live vs. historical analytics | **Two paths by temperature** (ADR-009): the dashboard's live page queries `movies_app_dev.movies` federated through UC; the demand page and the whole Genie space read the Delta gold tables | Live tiles need no pipeline at all — the UC registration is the bridge. Genie sees one curated model, so there is exactly one way to compute a metric |
+| Seed data | 8 movies, 3 theaters, 5 auditoriums (rows A–J × 12), 4 slots/day over a 21-day window (14 past + 7 future), ~357 showtimes, ~6.6k bookings; deterministic and idempotent. Occupancy follows a **declared demand model**, not uniform noise, with two deliberate under-served gaps | Uniform bookings left the dashboard flat and Genie with nothing to find. The seed plants a signal and the demo says so out loud — the analytics layer discovers it, it is never told |
+| AI/BI as code | Dashboard (`.lvdash.json`) and Genie space (`.geniespace.json`) are bundle resources, edited in the repo and round-tripped from the UI with `bundle generate dashboard \| genie-space` | Both surfaces deploy with everything else. Note the asymmetry: Genie validates its export strictly, Lakeview validates nothing (it accepts an invented `widgetType`) |
 | Infra as code | **Asset Bundles, direct engine** — every resource in one bundle | Reproducible from the repo; `catalogs` requires the direct engine |
 | App → DB auth | App connects as its **own service principal** with an OAuth token from `generate_database_credential`; the `database` app resource (`CAN_CONNECT_AND_CREATE`) creates the Postgres role | No passwords; tokens live ~1 h, refreshed by the backend |
 | Double-booking | `UNIQUE (showtime_id, seat_id)` on `booking_seats` + the whole booking in **one transaction**; unique violation → rollback → `409` with the taken seats | The database enforces the invariant; the app only translates errors |
@@ -144,7 +180,6 @@ that is not the repo.
 | Theaters | Several theaters, 1–2 auditoriums each; one auditorium per showtime | Enough to show "pick a theater" |
 | Auth / payments | None. A booking captures `customer_name` + `customer_email` and is confirmed immediately | Brief excludes both |
 | Currency / timezone | USD, UTC, displayed as-is | Avoids i18n work |
-| Seed data | 8 movies, 3 theaters, 5 auditoriums (rows A–J × 12), ~60 showtimes over 7 days, a few bookings; deterministic and idempotent | Makes the seat map look real |
 | Environments | Single `dev` target. `staging`/`prod` described in README, not built | Time budget |
 
 ---
@@ -305,15 +340,18 @@ running `src/analytics/gold.sql`
 The panel-facing tree is in `README.md`. What matters for editing:
 
 ```
-docs/            DATA_MODEL.md, DECISIONS.md (ADR-001..008), AI_USAGE_LOG.md exist;
+docs/            DATA_MODEL.md, DECISIONS.md (ADR-001..009), AI_USAGE_LOG.md exist;
                  DEMO_SCRIPT.md to write. ARCHITECTURE.md / SCALE_TO_MILLIONS.md
                  dropped 2026-09-07 — the README carries that content (§9)
 .claude/         settings.json (git denied), agents/databricks-engineer/, commands/build-check.md
 movies_app_bundle/
 ├── databricks.yml           engine: direct, variables, target
-├── resources/               lakebase.yml, lakehouse.yml, app.yml   (analytics_job.yml → Phase 6)
+├── resources/               lakebase.yml, lakehouse.yml, app.yml,
+│                            analytics_job.yml, analytics_ui.yml (dashboard + Genie)
 ├── src/seed/                check_connection.py, ddl.sql, seed_lakebase.py
-│   └── (src/analytics/gold.sql → Phase 6)
+├── src/analytics/           gold.sql — the three Delta gold tables
+├── src/dashboards/          movies_operations.lvdash.json — 9 datasets, 2 pages
+├── src/genie/               movies_demand.geniespace.json — tables + instructions
 └── movies_app/              App source_code_path
     ├── app.yaml, package.json, requirements.txt, requirements-dev.txt, Makefile
     ├── backend/  (§4.2)     frontend/  Vue 3 + Vite + TS
@@ -329,19 +367,31 @@ movies_app_bundle/
 Phases 1–5 are complete (§2). Do not start a phase before the previous
 done-check passes.
 
-**Phase 6 — remaining artifacts (~45 min).** In order:
+**Phase 7 — the analytics layer — is complete** (§2, ADR-009): the seed's demand
+model, the three gold tables + `analytics_job`, and the dashboard + Genie space
+as bundle resources. `bundle run analytics_job` succeeds, all three tables have
+rows, all nine dashboard datasets execute, and Genie answers the demo question
+from its own instructions.
 
-1. `analytics_job` + `src/analytics/gold.sql` (sql_task → Delta gold tables),
-   run once, show the tables in Catalog Explorer. The last unbuilt piece of the
-   architecture the README already describes.
-2. `docs/DEMO_SCRIPT.md`, with the re-seed and the two compute starts as step
-   zero, plus `docs/img/` screenshots as the offline backup.
+**Remaining before the demo (~40 min):**
+
+1. **Look at the dashboard again after any edit to its JSON.** The Lakeview API
+   stores widget definitions without validating them — it accepts an invented
+   `widgetType` with a `200` — so a clean deploy is not evidence. Datasets are
+   verified by executing them the way the runtime does (concatenate `queryLines`
+   with **no** separator, then wrap in `WITH q AS (...)`; every line must carry
+   its own `\n` — ADR-009). The visual specs can only be checked by opening the
+   page. Fix anything ugly in the UI, then round-trip it back:
+   `databricks bundle generate dashboard --resource movies_operations --force`.
+2. `docs/DEMO_SCRIPT.md`, with the re-seed, the `analytics_job` re-run and the
+   three compute starts as step zero, plus `docs/img/` screenshots as the
+   offline backup.
 3. ~~`docs/ARCHITECTURE.md` / `docs/SCALE_TO_MILLIONS.md`~~ — dropped
    2026-09-07; the content lives in the README and the promises were removed.
 
-*Done-check:* `bundle run analytics_job` succeeds and both gold tables have
-rows; a cold reader can follow `DEMO_SCRIPT.md` to a booking without asking a
-question.
+*Done-check:* the dashboard renders both pages with data; a cold reader can
+follow `DEMO_SCRIPT.md` to a booking, to that booking appearing on the live
+tile, and to Genie's recommendation, without asking a question.
 
 **Cut, not deferred:** cancellation (ADR-007). **Still deferred:** seat holds
 with expiry, idempotency keys, and the seven pooling items in ADR-006's
@@ -368,7 +418,18 @@ databricks bundle summary  -t dev              # deployed resources (prints "URL
                                                # the direct engine — trust `apps get` instead)
 databricks bundle deploy   -t dev              # uploads code + updates resources; does NOT restart the app
 databricks bundle run movies_app -t dev        # new app deployment: npm install, pip install, npm run build, start
-databricks bundle run analytics_job -t dev     # Phase 6
+databricks bundle run analytics_job -t dev     # rebuild the Delta gold tables
+
+# AI/BI — round-trip a UI edit back into the repo (then commit the JSON)
+databricks bundle generate dashboard   --resource movies_operations --force
+databricks bundle generate genie-space --resource movies_demand     --force
+
+# ask the deployed Genie space a question without a browser
+databricks genie start-conversation <space-id> 'Where and for which movies should we open new functions?' -p movies -o json
+databricks genie get-message <space-id> <conversation-id> <message-id> -p movies -o json
+
+# run a dashboard dataset / any SQL against the warehouse
+databricks api post /api/2.0/sql/statements --json @stmt.json -p movies
 
 databricks database get-database-instance movies-app-dev -p movies   # state, read_write_dns
 databricks database generate-database-credential -p movies --json '{"instance_names":["movies-app-dev"]}'
@@ -439,16 +500,17 @@ Python 3.11 — avoid 3.12+ only syntax.**
 ## 9. Interview artifacts (docs/)
 
 Existing: `DATA_MODEL.md` (ERD + constraint notes), `DECISIONS.md`
-(ADR-001…007), `AI_USAGE_LOG.md` (R8, running log, Phases 1–6).
+(ADR-001…009), `AI_USAGE_LOG.md` (R8, running log, Phases 1–7).
 
 To write:
 
-- **`DEMO_SCRIPT.md`** — 5-minute path: open app → movie → theater → seat map →
+- **`DEMO_SCRIPT.md`** — the path: open app → movie → theater → seat map →
   book 2 seats → show the row in Catalog Explorer → re-book the same seats →
-  409 → show the bundle resources. Backup: screenshots in `docs/img/`.
-  **Step zero is the pre-flight**: re-seed with `--reset` (the showtime window
-  expires), start the Lakebase instance and the app compute ≥15 min ahead, then
-  confirm `/api/health` reports `db: connected`.
+  409 → **the booking on the live dashboard tile** → **ask Genie where to open
+  new functions** → show the bundle resources that deployed all of it. Backup:
+  screenshots in `docs/img/`. **Step zero is the pre-flight** (§2): re-seed with
+  `--reset`, re-run `analytics_job`, start Lakebase + app compute ≥15 min ahead
+  and the warehouse ≥5 min ahead, confirm `/api/health` reports `db: connected`.
 
 **Dropped 2026-09-07:** `ARCHITECTURE.md` and `SCALE_TO_MILLIONS.md`. The
 README's §Architecture already carries the diagram and the services-vs-
@@ -469,7 +531,10 @@ aimed at files that would not exist by the demo.
 | Lakebase database / schema | `movies_dev` / `movies` |
 | UC catalog for Lakebase | `movies_app_dev` → `https://dbc-66830d2c-97a4.cloud.databricks.com/explore/data/movies_app_dev?o=2485046985091381` |
 | Analytics catalog.schema (Delta) | `movies_analytics_dev.movies` |
-| SQL warehouse | `movies_analytics`, id `50b70f5e18138968` (key `movies_analytics_warehouse`; serverless PRO, 2X-Small, auto-stop 20 min) |
+| SQL warehouse | `movies_analytics`, id `72704e9c199eb256` (key `movies_analytics_warehouse`; serverless PRO, 2X-Small, auto-stop 20 min). **The id changes whenever the warehouse is recreated** — the previously recorded `50b70f5e18138968` was stale and returned "warehouse not found". Reference it as `${resources.sql_warehouses.movies_analytics_warehouse.id}`, never as a literal; re-check with `databricks warehouses list` before trusting this cell |
+| AI/BI dashboard | `Movies — live operations and demand`, id `01f1aabfa9f11c97981e76b48407fa28` (key `movies_operations`) |
+| Genie space | `Movies — cinema demand`, id `01f1aabfd22f1ac5a20063d5511ba352` (key `movies_demand`) |
+| Analytics job | `movies-analytics-gold-dev`, id `743598470449255` (key `analytics_job`) |
 | App name / URL | `movies-app-dev` · `https://movies-app-dev-2485046985091381.aws.databricksapps.com` |
 | App SP client id | `010ae2f6-6206-498c-a005-17daf4850a48` |
 | Interview date | **Wednesday 2026-09-09** |

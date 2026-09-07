@@ -1,0 +1,20 @@
+resources:
+  jobs:
+    analytics_job:
+      name: movies-analytics-gold-${bundle.target}
+      description: >-
+        Rebuilds the Delta gold tables in movies_analytics_dev.movies from the
+        Lakebase OLTP tables (movies_app_dev.movies, via Unity Catalog). No
+        schedule — run on demand (`databricks bundle run analytics_job`) for
+        the demo.
+      tasks:
+        - task_key: build_gold_tables
+          sql_task:
+            warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
+            file:
+              path: ../src/analytics/gold.sql
+            parameters:
+              analytics_catalog: ${resources.catalogs.movies_analytics.name}
+              analytics_schema: ${resources.schemas.movies.name}
+              lakebase_catalog: ${resources.database_catalogs.catalog_movies_db.name}
+              lakebase_schema: movies

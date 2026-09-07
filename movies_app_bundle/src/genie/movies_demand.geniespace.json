@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "data_sources": {
+    "tables": [
+      {
+        "identifier": "movies_analytics_dev.movies.demand_by_movie_theater_slot"
+      },
+      {
+        "identifier": "movies_analytics_dev.movies.revenue_by_day"
+      },
+      {
+        "identifier": "movies_analytics_dev.movies.showtime_occupancy"
+      }
+    ]
+  },
+  "instructions": {
+    "text_instructions": [
+      {
+        "id": "00000000000000000000000000000001",
+        "content": [
+          "DOMAIN GLOSSARY — cinema programming.\n\nThis space answers questions about how well a cinema chain's showings sell, and where it should schedule more of them. Three theaters, five auditoriums, eight movies.\n\n- A **showtime** is one movie, in one auditorium, at one start time. Users also call this a *function*, a *función*, a *screening*, a *showing* or a *session* — they all mean a showtime. They never mean a SQL function.\n- \"Opening a new function\" or \"adding showings\" means scheduling additional showtimes for a movie at a theater in a given time slot.\n- **Capacity** is the number of seats in the auditorium (120 in every room here). **seats_sold** is how many were booked. **occupancy_pct** is seats_sold / capacity as a percentage from 0 to 100, and it is already computed — never divide it again.\n- A **sellout** is a showtime at 95% occupancy or more.\n- **time_slot** is one of matinee, afternoon, evening, late.\n- A **settled** show is one that has already played, so its sales are final. Upcoming shows are still selling.\n- All money is USD and all timestamps are UTC. Report them as stored; never convert timezones.\n\n---\n\nWHICH TABLE TO USE.\n\n- `showtime_occupancy` — one row per showtime. Use it for questions about individual shows: which shows sold out, how full a particular screening was, what is on tonight, how upcoming shows are filling.\n- `demand_by_movie_theater_slot` — one row per movie x theater x time_slot, over settled shows only. Use it for every question about demand, popularity, or programming decisions.\n- `revenue_by_day` — one row per show date x theater. Use it for trends over time and revenue comparisons between theaters.\n\nAGGREGATION RULE, important: occupancy_pct and sellout_rate are percentages of different denominators, so they must never be averaged or summed across rows. To roll occupancy up to any level, recompute it: `100.0 * sum(seats_sold) / sum(seats_offered)`. The same applies to sellout_rate: `100.0 * sum(sellouts) / sum(showtimes_offered)`.\n\n---\n\nHOW TO ANSWER \"WHERE AND FOR WHICH MOVIES SHOULD WE OPEN NEW FUNCTIONS?\"\n\nThis is a programming decision, so answer it with evidence, not a single number:\n\n1. Work from `demand_by_movie_theater_slot`.\n2. Only consider rows with `showtimes_offered >= 3`. One lucky sold-out screening is not evidence of demand.\n3. Rank by `occupancy_pct` descending, then by `sellout_rate` descending.\n4. Always answer with the full combination of **movie + theater + time_slot**. A movie alone is not an actionable answer: the question is where and when, not just what.\n5. Report `showtimes_offered` next to each recommendation so the user can see the sample size, and `revenue_per_showtime` so they can see what a new showing would be worth.\n\nCanonical query:\n\nSELECT title, theater_name, city, time_slot, showtimes_offered, occupancy_pct, sellout_rate, revenue_per_showtime\nFROM movies_analytics_dev.movies.demand_by_movie_theater_slot\nWHERE showtimes_offered >= 3\nORDER BY occupancy_pct DESC, sellout_rate DESC\nLIMIT 10\n\nIf the user asks specifically about a city or a theater, filter on `city` or `theater_name` and keep the same ranking.\n\n---\n\nCAVEATS TO STATE IN THE ANSWER.\n\n- `demand_by_movie_theater_slot` contains settled shows only. If the user asks about upcoming demand, use `showtime_occupancy` with `is_settled = false`, and say plainly that those numbers are partial because the shows are still selling.\n- A movie that a theater never plays has no row at all in `demand_by_movie_theater_slot` for that theater. Absence means \"never scheduled there\", not \"no demand\". If a strong title is missing from a theater, that is worth pointing out as an opportunity rather than treating it as zero demand.\n- The history covers roughly two weeks. Say so when the user asks about long-term trends or seasonality — there is not enough data to support a seasonal claim."
+        ]
+      }
+    ]
+  }
+}

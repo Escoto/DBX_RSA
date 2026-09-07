@@ -9,11 +9,17 @@ Everything here is deterministic (seeded RNG, derived ids) and idempotent
 (ON CONFLICT), so re-running converges on the same database instead of piling
 up duplicates. --reset truncates first, for a clean pre-demo state.
 
-Showtime ids are relative to the run date (st-d0-* is today), so the schedule
-is a rolling 7-day window: re-running on a later day WITHOUT --reset moves the
-existing showtimes, and every booking on them, forward to the new window.
-Deliberate for a demo whose date is not fixed; always re-seed with --reset
-right before the demo.
+Showtime ids are relative to the run date (st-d00-* is today, st-m03-* is three
+days ago), so the schedule is a rolling window: 14 days of settled history for
+the analytics layer plus the 7 bookable days the app exposes. Re-running on a
+later day WITHOUT --reset moves the existing showtimes, and every booking on
+them, forward to the new window. Deliberate for a demo whose date is not fixed;
+always re-seed with --reset right before the demo.
+
+Bookings are not uniform noise: PROGRAMMING and the demand model below encode a
+deliberate distribution (popular titles, prime slots, weekend bumps, and two
+under-served gaps), so the dashboard and the Genie space have a real signal to
+discover. See the comment above MOVIE_DEMAND.
 
 Usage (Windows Python, reading the WSL CLI profile):
 
@@ -96,8 +102,77 @@ PREMIUM_ROWS = {"E", "F", "G"}
 ACCESSIBLE_ROW = "A"
 ACCESSIBLE_NUMBERS = {1, 2, 11, 12}
 
-DAYS_AHEAD = 7
-SHOW_SLOTS_UTC = [(15, 0), (19, 30)]  # (hour, minute)
+DAYS_BACK = 14   # settled history, for the analytics layer
+DAYS_AHEAD = 7   # the bookable window the app exposes
+
+# (hour, minute) in UTC. The labels are the schedule's own names for its slots,
+# not a derivation from each city's local time — the whole app displays UTC as
+# is (see CLAUDE.md §3), and the analytics layer inherits that.
+SHOW_SLOTS_UTC = [(11, 0), (15, 0), (19, 30), (22, 15)]
+SLOT_LABELS = ["matinee", "afternoon", "evening", "late"]
+SLOT_PRICE_DELTA = {0: -1.50, 1: 0.00, 2: 2.00, 3: 0.50}
+
+# ------------------------------------------------------------- demand model
+#
+# The seed encodes a deliberate demand distribution instead of booking seats
+# uniformly at random. Uniform noise makes every auditorium look equally empty
+# and leaves the analytics layer with nothing to find: a dashboard of flat bars
+# and a Genie space that answers "which movie should we add showings for?" with
+# whatever the RNG happened to favour. Say this out loud in the demo — the seed
+# plants a signal, the analytics layer discovers it; it is never told about it.
+#
+# Expected share of a full house for each movie in a prime evening slot at the
+# strongest theater, before slot/theater/weekend factors.
+MOVIE_DEMAND = {
+    "mov-04": 0.95,  # Iron Meridian     — the tentpole, sells out evenings
+    "mov-01": 0.72,  # Neon Harbor       — solid second title
+    "mov-08": 0.58,  # Midnight Cartography
+    "mov-05": 0.50,  # Salt and Static   — horror, skews late
+    "mov-02": 0.44,  # The Quiet Ledger
+    "mov-03": 0.40,  # Paper Lanterns    — family, skews matinee
+    "mov-06": 0.33,  # A Year of Tuesdays
+    "mov-07": 0.18,  # The Long Ascent   — documentary, the control case
+}
+SLOT_FACTOR = {0: 0.45, 1: 0.70, 2: 1.00, 3: 0.55}
+THEATER_FACTOR = {"th-01": 1.00, "th-02": 0.88, "th-03": 0.80}
+WEEKEND_FACTOR = 1.25            # Friday, Saturday, Sunday
+WEEKEND_WEEKDAYS = {4, 5, 6}     # datetime.weekday(): Mon=0
+# (movie, slot) pairs that beat their slot's baseline: kids at the matinee,
+# horror at the late show, the climbing documentary with the morning crowd.
+MOVIE_SLOT_BONUS = {("mov-03", 0): 1.60, ("mov-05", 3): 1.40, ("mov-07", 0): 1.20}
+
+# How much of a showtime's final demand has already been sold, by days until
+# the show. Tonight is nearly settled; next Sunday has barely opened. This is
+# what makes the live dashboard interesting: the near-term shows are filling
+# and the far ones are not.
+LEAD_TIME_SOLD = {0: 0.92, 1: 0.78, 2: 0.62, 3: 0.48, 4: 0.38, 5: 0.30, 6: 0.24}
+# Never sell a future show right out — the demo has to be able to book a seat.
+MAX_FUTURE_OCCUPANCY = 0.94
+
+# The programming grid: auditorium -> slot -> the movies that rotate through it
+# (indexed by day), or None where the auditorium runs no show in that slot.
+#
+# Two gaps are deliberate, and they are the answer to the Genie question:
+#   1. Iron Meridian sells out evenings in aud-01, while next door aud-02 gives
+#      its evening screen to a low-demand romance and runs no late show at all.
+#   2. Harbor Point (th-03) never plays Iron Meridian, despite being the only
+#      screen in its city.
+PROGRAMMING: dict[str, dict[int, list[str] | None]] = {
+    # th-01 Slalom Cinema Downtown, Seattle
+    "aud-01": {0: ["mov-03"], 1: ["mov-01", "mov-08"], 2: ["mov-04"], 3: ["mov-05"]},
+    "aud-02": {0: ["mov-07"], 1: ["mov-02"], 2: ["mov-06"], 3: None},
+    # th-02 Lakeview Picturehouse, Chicago
+    "aud-03": {0: ["mov-03"], 1: ["mov-08"], 2: ["mov-04"], 3: ["mov-05"]},
+    "aud-04": {0: None, 1: ["mov-06"], 2: ["mov-01"], 3: ["mov-02"]},
+    # th-03 Harbor Point Cineplex, Boston
+    "aud-05": {0: ["mov-03", "mov-07"], 1: ["mov-08"], 2: ["mov-01"], 3: None},
+}
+
+# Where people actually sit: middle rows first, centre outwards. Drives both a
+# believable seat map and a believable occupancy curve.
+ROW_DESIRABILITY = ["F", "E", "G", "D", "H", "C", "I", "B", "J", "A"]
+PARTY_SIZES = [1, 2, 3, 4, 5]
+PARTY_WEIGHTS = [18, 42, 22, 12, 6]
 
 CUSTOMER_FIRST = ["Ana", "Marcus", "Priya", "Tomas", "Lena", "Owen", "Chidi", "Yuki", "Rosa", "Ibrahim"]
 CUSTOMER_LAST = ["Delgado", "Fisher", "Raman", "Novak", "Bauer", "Whitfield", "Okafor", "Tanaka", "Iglesias", "Haddad"]
@@ -132,29 +207,40 @@ def build_seats() -> list[tuple[str, str, str, int, str]]:
     return rows
 
 
-def build_showtimes(now: datetime) -> list[tuple[str, str, str, datetime, float, float]]:
-    """One showtime per (day, slot, auditorium), movies assigned round-robin.
+def showtime_id_for(day: int, slot: int, auditorium_id: str) -> str:
+    """Ids are relative to the run date: st-m03-* is three days ago, st-d03-* in three."""
+    stamp = f"m{-day:02d}" if day < 0 else f"d{day:02d}"
+    return f"st-{stamp}-s{slot}-{auditorium_id}"
 
-    The round-robin runs across auditoriums, so every movie ends up playing in
-    more than one theater — which is what makes the 'pick a theater' step of the
-    demo meaningful.
+
+def build_showtimes(now: datetime):
+    """The programming grid over the window, from DAYS_BACK ago to DAYS_AHEAD out.
+
+    Returns the insertable rows plus a metadata map the booking generator needs
+    (slot, theater, how far off the show is) so it never has to parse ids back.
+
+    Every movie plays in at least two theaters, which is what makes the 'pick a
+    theater' step of the demo meaningful; PROGRAMMING is what decides where.
     """
     theater_order = {th[0]: idx for idx, th in enumerate(THEATERS)}
-    theater_index = {aud: theater_order[th] for aud, th, _n in AUDITORIUMS}
+    theater_of = {aud: th for aud, th, _n in AUDITORIUMS}
     day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = []
-    counter = 0
-    for day in range(DAYS_AHEAD):
+    meta: dict[str, dict] = {}
+    for day in range(-DAYS_BACK, DAYS_AHEAD):
         for slot, (hour, minute) in enumerate(SHOW_SLOTS_UTC):
-            for auditorium_id, _theater_id, _name in AUDITORIUMS:
-                movie_id = MOVIES[counter % len(MOVIES)][0]
-                counter += 1
+            for auditorium_id, theater_id, _name in AUDITORIUMS:
+                rotation = PROGRAMMING[auditorium_id][slot]
+                if rotation is None:
+                    continue  # the auditorium is dark in this slot — free capacity
+                movie_id = rotation[(day + DAYS_BACK) % len(rotation)]
                 starts_at = day0 + timedelta(days=day, hours=hour, minutes=minute)
-                # City surcharge plus an evening bump; premium is a flat +$5.
-                base = 12.00 + 1.50 * theater_index[auditorium_id] + (2.00 if slot else 0.00)
+                # City surcharge plus a per-slot delta; premium is a flat +$5.
+                base = 12.00 + 1.50 * theater_order[theater_id] + SLOT_PRICE_DELTA[slot]
+                showtime_id = showtime_id_for(day, slot, auditorium_id)
                 rows.append(
                     (
-                        f"st-d{day}-s{slot}-{auditorium_id}",
+                        showtime_id,
                         movie_id,
                         auditorium_id,
                         starts_at,
@@ -162,49 +248,134 @@ def build_showtimes(now: datetime) -> list[tuple[str, str, str, datetime, float,
                         round(base + 5.00, 2),
                     )
                 )
-    return rows
+                meta[showtime_id] = {
+                    "movie_id": movie_id,
+                    "auditorium_id": auditorium_id,
+                    "theater_id": theater_of[auditorium_id],
+                    "slot": slot,
+                    "day": day,
+                    "starts_at": starts_at,
+                    "price_standard": round(base, 2),
+                    "price_premium": round(base + 5.00, 2),
+                }
+    return rows, meta
 
 
-def build_bookings(showtimes, seats_by_auditorium, rng):
-    """Pre-existing bookings so the seat map does not look empty on first load.
+def demand_for(info: dict) -> float:
+    """Share of the house this showtime ends up selling, before lead time.
 
-    Booking ids are uuid5 of a stable name, so re-running the seed updates the
-    same rows instead of creating new ones.
+    Product of the factors declared above, so every number in the analytics
+    layer traces back to one line of the demand model.
     """
-    aud_of = {s[0]: s[2] for s in showtimes}
-    price_of = {s[0]: (float(s[4]), float(s[5])) for s in showtimes}
+    share = MOVIE_DEMAND[info["movie_id"]]
+    share *= SLOT_FACTOR[info["slot"]]
+    share *= THEATER_FACTOR[info["theater_id"]]
+    share *= MOVIE_SLOT_BONUS.get((info["movie_id"], info["slot"]), 1.0)
+    if info["starts_at"].weekday() in WEEKEND_WEEKDAYS:
+        share *= WEEKEND_FACTOR
+    return share
+
+
+def rows_by_label(seat_rows) -> dict[str, list[str]]:
+    """Seat ids per row, in seat-number order (so adjacency in the list is adjacency in the row)."""
+    by_row: dict[str, list[tuple[int, str]]] = {}
+    for seat_id, _aud, row_label, seat_number, _stype in seat_rows:
+        by_row.setdefault(row_label, []).append((seat_number, seat_id))
+    return {label: [sid for _num, sid in sorted(pairs)] for label, pairs in by_row.items()}
+
+
+def weighted_row_order(rng: random.Random) -> list[str]:
+    """A random row order biased towards the good rows (Efraimidis-Spirakis weighted shuffle)."""
+    keyed = []
+    for idx, row_label in enumerate(ROW_DESIRABILITY):
+        weight = len(ROW_DESIRABILITY) - idx
+        keyed.append((rng.random() ** (1.0 / weight), row_label))
+    keyed.sort(reverse=True)
+    return [label for _key, label in keyed]
+
+
+def pick_block(by_row: dict[str, list[str]], taken: set[str], party: int, rng: random.Random):
+    """A free contiguous block of `party` seats, preferring good rows and centre seats.
+
+    Falls back to smaller parties rather than scattering a group across the room,
+    and returns None only when the house is genuinely full.
+    """
+    for size in range(party, 0, -1):
+        for row_label in weighted_row_order(rng):
+            seats = by_row[row_label]
+            centre = (len(seats) - 1) / 2
+            candidates = []
+            for start in range(len(seats) - size + 1):
+                block = seats[start : start + size]
+                if any(seat_id in taken for seat_id in block):
+                    continue
+                candidates.append((abs((start + (size - 1) / 2) - centre), block))
+            if candidates:
+                candidates.sort(key=lambda c: c[0])
+                return rng.choice(candidates[:3])[1]
+    return None
+
+
+def booked_at_for(starts_at: datetime, now: datetime, rng: random.Random) -> datetime:
+    """When the booking was made: mostly in the last days before the show.
+
+    Without this every row would carry a created_at of 'the moment the seed ran',
+    which would make any sales-over-time chart a single spike and any question
+    about booking lead time unanswerable.
+    """
+    lead_days = rng.choices([0, 1, 2, 3, 5, 8, 12], weights=[30, 22, 16, 12, 10, 6, 4])[0]
+    booked = starts_at - timedelta(
+        days=lead_days, hours=rng.randrange(0, 24), minutes=rng.randrange(0, 60)
+    )
+    if booked >= now:
+        # A show still in the future cannot have been booked after 'now'.
+        booked = now - timedelta(hours=rng.randrange(1, 72), minutes=rng.randrange(0, 60))
+    return booked
+
+
+def build_bookings(showtimes, meta, seats_by_auditorium, rng, now: datetime):
+    """Sell each showtime to the occupancy its demand model implies.
+
+    Past shows are settled at their full demand; future ones are sold down the
+    lead-time curve, capped so the demo can always still book a seat. Booking
+    ids are uuid5 of a stable name, so re-running the seed converges on the same
+    rows instead of piling up duplicates.
+    """
     seat_type = {}
-    for rows in seats_by_auditorium.values():
-        for seat_id, _aud, _row, _num, stype in rows:
+    for seat_rows in seats_by_auditorium.values():
+        for seat_id, _aud, _row, _num, stype in seat_rows:
             seat_type[seat_id] = stype
+    rows_of = {aud: rows_by_label(seat_rows) for aud, seat_rows in seats_by_auditorium.items()}
 
-    # Spread the pre-booked showtimes over the first two days so the demo click
-    # path lands on a map that already has sold seats.
-    target_showtimes = [s[0] for s in showtimes if s[0].startswith(("st-d0-", "st-d1-"))]
-
-    bookings = []          # (booking_id, showtime_id, name, email, status)
+    bookings = []          # (booking_id, showtime_id, name, email, status, created_at)
     booking_seats = []     # (booking_id, seat_id, showtime_id, auditorium_id, price)
-    for showtime_id in target_showtimes:
+    for showtime_id, _movie, auditorium_id, starts_at, std, prem in showtimes:
+        info = meta[showtime_id]
+        share = demand_for(info)
+        if info["day"] >= 0:
+            share *= LEAD_TIME_SOLD.get(info["day"], min(LEAD_TIME_SOLD.values()))
+            share = min(share, MAX_FUTURE_OCCUPANCY)
+        else:
+            share = min(share, 1.0)
+        share *= rng.uniform(0.88, 1.12)  # no two showtimes land on the same number
+        capacity = len(seats_by_auditorium[auditorium_id])
+        target = max(0, min(capacity, round(share * capacity)))
+
+        by_row = rows_of[auditorium_id]
         taken: set[str] = set()
-        pool = [row[0] for row in seats_by_auditorium[aud_of[showtime_id]]]
-        for n in range(rng.randint(2, 4)):
+        sold = 0
+        n = 0
+        while sold < target and n < 200:
+            party = min(rng.choices(PARTY_SIZES, weights=PARTY_WEIGHTS)[0], target - sold)
+            block = pick_block(by_row, taken, party, rng)
+            if block is None:
+                break
+            taken.update(block)
+            sold += len(block)
             first = rng.choice(CUSTOMER_FIRST)
             last = rng.choice(CUSTOMER_LAST)
             booking_id = uuid.uuid5(SEED_NAMESPACE, f"{showtime_id}:{n}")
-            party = rng.randint(1, 4)
-            chosen = []
-            # Pick a contiguous block where possible; people book together.
-            for _attempt in range(20):
-                start = rng.randrange(0, len(pool) - party)
-                block = pool[start : start + party]
-                same_row = len({seat_id.rsplit("-", 1)[1][0] for seat_id in block}) == 1
-                if same_row and not (set(block) & taken):
-                    chosen = block
-                    break
-            if not chosen:
-                continue
-            taken.update(chosen)
-            std, prem = price_of[showtime_id]
+            n += 1
             bookings.append(
                 (
                     booking_id,
@@ -212,13 +383,12 @@ def build_bookings(showtimes, seats_by_auditorium, rng):
                     f"{first} {last}",
                     f"{first.lower()}.{last.lower()}@example.com",
                     "CONFIRMED",
+                    booked_at_for(starts_at, now, rng),
                 )
             )
-            for seat_id in chosen:
-                price = prem if seat_type[seat_id] == "premium" else std
-                booking_seats.append(
-                    (booking_id, seat_id, showtime_id, aud_of[showtime_id], price)
-                )
+            for seat_id in block:
+                price = float(prem) if seat_type[seat_id] == "premium" else float(std)
+                booking_seats.append((booking_id, seat_id, showtime_id, auditorium_id, price))
     return bookings, booking_seats
 
 
@@ -293,8 +463,10 @@ def load(conn: psycopg.Connection, now: datetime) -> None:
     seats_by_auditorium: dict[str, list] = {}
     for row in seats:
         seats_by_auditorium.setdefault(row[1], []).append(row)
-    showtimes = build_showtimes(now)
-    bookings, booking_seats = build_bookings(showtimes, seats_by_auditorium, rng)
+    showtimes, showtime_meta = build_showtimes(now)
+    bookings, booking_seats = build_bookings(
+        showtimes, showtime_meta, seats_by_auditorium, rng, now
+    )
 
     with conn.cursor() as cur:
         cur.executemany(
@@ -341,8 +513,9 @@ def load(conn: psycopg.Connection, now: datetime) -> None:
         )
 
         cur.executemany(
-            "INSERT INTO bookings (booking_id, showtime_id, customer_name, customer_email, status) "
-            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (booking_id) DO NOTHING",
+            "INSERT INTO bookings (booking_id, showtime_id, customer_name, customer_email, "
+            "status, created_at) VALUES (%s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (booking_id) DO NOTHING",
             bookings,
         )
 
@@ -421,6 +594,57 @@ def report(conn: psycopg.Connection) -> None:
         for title, count in cur.fetchall():
             print(f"  {title:<24} {count}")
 
+        # The demand model, read back out of the data. Past shows are settled;
+        # upcoming ones are partly sold down the lead-time curve. This is the
+        # done-check for the analytics layer: if these numbers are flat, the
+        # dashboard and the Genie space have nothing to find.
+        occupancy = sql.SQL(
+            "SELECT {dims}, count(*) AS shows, "
+            "  round(100.0 * sum(x.sold) / sum(a.row_count * a.seats_per_row), 1) AS pct "
+            "FROM {st} s "
+            "JOIN {au} a USING (auditorium_id) "
+            "JOIN {mv} m USING (movie_id) "
+            "JOIN {th} t USING (theater_id) "
+            "LEFT JOIN LATERAL ("
+            "  SELECT count(*) AS sold FROM {bs} bs WHERE bs.showtime_id = s.showtime_id"
+            ") x ON true "
+            "{where} GROUP BY {group} ORDER BY {order} {limit}"
+        )
+        parts = {
+            "st": sql.Identifier(SCHEMA, "showtimes"),
+            "au": sql.Identifier(SCHEMA, "auditoriums"),
+            "mv": sql.Identifier(SCHEMA, "movies"),
+            "th": sql.Identifier(SCHEMA, "theaters"),
+            "bs": sql.Identifier(SCHEMA, "booking_seats"),
+        }
+        cur.execute(
+            occupancy.format(
+                dims=sql.SQL("CASE WHEN s.starts_at < now() THEN 'past' ELSE 'upcoming' END"),
+                where=sql.SQL(""),
+                group=sql.SQL("1"),
+                order=sql.SQL("1"),
+                limit=sql.SQL(""),
+                **parts,
+            )
+        )
+        print("\noccupancy by window")
+        for window, shows, pct in cur.fetchall():
+            print(f"  {window:<10} shows={shows:<5} {pct}% full")
+
+        cur.execute(
+            occupancy.format(
+                dims=sql.SQL("m.title, t.name"),
+                where=sql.SQL("WHERE s.starts_at < now()"),
+                group=sql.SQL("1, 2"),
+                order=sql.SQL("pct DESC"),
+                limit=sql.SQL("LIMIT 6"),
+                **parts,
+            )
+        )
+        print("\ntop demand, settled shows (movie x theater)")
+        for title, theater, shows, pct in cur.fetchall():
+            print(f"  {pct:>5}%  {title:<24} {theater:<26} shows={shows}")
+
         # What the schema actually enforces, from the catalog rather than from
         # ddl.sql: this is the Phase 2 done-check made repeatable.
         cur.execute(
@@ -449,7 +673,9 @@ def report(conn: psycopg.Connection) -> None:
         if not grants:
             print("  none: the app cannot read the tables. Re-run with --app-sp-client-id.")
         for grantee, table_count, privileges in grants:
-            print(f"  {grantee}  tables={table_count}  {','.join(privileges)}")
+            # array_agg comes back as a Postgres array literal string, not a list.
+            listed = privileges if isinstance(privileges, str) else ",".join(privileges)
+            print(f"  {grantee}  tables={table_count}  {listed.strip('{}')}")
 
 
 def main() -> int:

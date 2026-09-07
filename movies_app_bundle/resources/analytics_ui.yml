@@ -1,0 +1,36 @@
+# The AI/BI layer: one dashboard and one Genie space, both deployed from the
+# bundle like every other resource.
+#
+# Neither asset is authored blind. The workflow is: edit the JSON here, deploy,
+# refine visually in the workspace, then round-trip the workspace version back
+# into the repo with
+#   databricks bundle generate dashboard   --resource movies_operations --force
+#   databricks bundle generate genie-space --resource movies_demand     --force
+# so the repo stays the source of truth even though the UI is the better editor.
+#
+# The serialized definitions name `movies_analytics_dev` / `movies_app_dev`
+# literally rather than through bundle variables, because there is a single dev
+# target (CLAUDE.md §3). The dashboard resource has `dataset_catalog` /
+# `dataset_schema` for retargeting if a second environment is ever built.
+resources:
+  dashboards:
+    movies_operations:
+      display_name: Movies — live operations and demand
+      file_path: ../src/dashboards/movies_operations.lvdash.json
+      parent_path: ${workspace.resource_path}
+      warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
+      lifecycle:
+        prevent_destroy: false
+
+  genie_spaces:
+    movies_demand:
+      title: Movies — cinema demand
+      description: >-
+        Ask about how full the cinemas are, which titles are selling, and where
+        to schedule more showings. Reads the Delta gold tables in
+        movies_analytics_dev.movies.
+      file_path: ../src/genie/movies_demand.geniespace.json
+      parent_path: ${workspace.resource_path}
+      warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
+      lifecycle:
+        prevent_destroy: false

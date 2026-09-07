@@ -559,3 +559,168 @@ runtime, not only in code.
 - **An app-level semaphore in front of the router**, independent of anyio's
   limiter. More explicit, but duplicates a limiter FastAPI/anyio already
   provide for exactly this purpose. Rejected as unnecessary machinery.
+
+---
+
+## ADR-009 — The analytics layer: federated live reads, Delta gold for AI/BI, and a seed that carries a signal
+
+**Date:** 2026-09-07 · **Phase:** 7 · **Status:** accepted · **Changes:**
+`src/seed/seed_lakebase.py`, `src/analytics/gold.sql`,
+`src/dashboards/movies_operations.lvdash.json`,
+`src/genie/movies_demand.geniespace.json`, `resources/analytics_job.yml`,
+`resources/analytics_ui.yml`
+
+### Context
+
+The README described a lakehouse side of the architecture that did not exist:
+Delta gold tables, and the claim that the Unity Catalog registration bridges
+OLTP and analytics. The remaining demo goal was to make that real, and to add
+the two Databricks-native surfaces the panel will recognise — an AI/BI
+dashboard showing cinemas filling up, and a Genie space that answers
+programming questions in natural language ("where and for which movies should
+we open new functions?").
+
+Three things had to be settled before any of it could be built.
+
+**1. Where does "live" data come from?** A dashboard tile showing seats selling
+in real time can either read the OLTP tables directly or read a materialised
+copy on a refresh cycle. Verified on the platform first: a serverless SQL
+warehouse can query `movies_app_dev.movies.*` — the Lakebase database
+registered in UC — live, with no ETL step
+(`SELECT count(*) FROM movies_app_dev.movies.booking_seats` returns the row a
+booking committed a second ago).
+
+**2. The seed had no signal to find.** The original generator booked 2–4 random
+parties per showtime on the first two days only: 132 seats across 70 showtimes
+of 120 seats, uniform across every movie, theater and slot. Every auditorium
+would have rendered ~95% empty, and "which movie deserves more showings?" would
+have been answered by whichever combination the RNG happened to favour. That is
+not a platform problem, it is a data problem, and it would have made both new
+surfaces worthless — worse than worthless in front of a panel that asks "why
+that recommendation?"
+
+**3. Neither AI/BI asset validates its own definition.** Probing the Lakeview
+API with `"widgetType": "flurb"` produced a `200`. Dashboard specs are stored,
+not checked, so a successful deploy proves only that the JSON parsed.
+
+### Decision
+
+**1. Two paths, by temperature.** The hot path is federated: the four "Live
+operations" datasets read `movies_app_dev.movies` through UC, so a seat booked
+in the app appears on the next dashboard refresh with no pipeline in between.
+The cold path is materialised: `analytics_job` (one `sql_task`) builds three
+Delta tables in `movies_analytics_dev.movies` — `showtime_occupancy` (per
+showtime), `demand_by_movie_theater_slot` (per movie × theater × slot, settled
+shows only) and `revenue_by_day`. Genie reads only the gold tables, never the
+federated ones, so there is exactly one way to compute a metric.
+
+**2. The seed encodes a demand model, and says so.** `PROGRAMMING` in
+`seed_lakebase.py` is an explicit grid of which auditorium runs which movie in
+which of four daily slots, over a 21-day window (14 days of settled history,
+the 7 bookable days the app exposes). Occupancy per showtime is the product of
+declared factors — movie popularity, slot, theater, weekend, a matinee/late
+genre bonus — times a lead-time curve for shows that have not happened yet,
+capped at `MAX_FUTURE_OCCUPANCY = 0.94` so the demo can always still book a
+seat. Seats fill centre-out from the good rows, and `created_at` is backdated
+to a plausible moment before each show rather than left at "when the seed ran".
+
+Two gaps in the grid are deliberate and are the answer to the Genie question:
+Iron Meridian sells out evenings in `aud-01` while `aud-02` next door gives its
+evening screen to a low-demand romance and runs no late show at all, and Harbor
+Point never plays the strongest title in the chain. Result: 357 showtimes, 6,597
+bookings, 15,526 sold seats; settled shows average 42.8% full, upcoming 22.4%;
+Iron Meridian evenings at Slalom Cinema Downtown run 97.1% with a 78.6% sellout
+rate, against 8.7% for documentary matinees at Harbor Point.
+
+This is stated out loud in the demo: the seed plants a signal, the analytics
+layer discovers it, and it is never told where to look.
+
+**3. Genie is configured as code, with the reasoning written down.** The
+`genie_spaces` bundle resource carries `data_sources` plus one instruction block
+that defines the glossary (a *function* / *función* / *screening* is a showtime,
+never a SQL function), the aggregation rule (percentages of different
+denominators must be recomputed, never averaged), the ranking procedure for
+programming questions (minimum three showtimes offered; always answer with
+movie **and** theater **and** slot), and the caveats worth stating (settled vs
+still-selling; a missing row means "never scheduled here", not "no demand").
+Table and column `COMMENT`s in `gold.sql` carry the schema semantics.
+
+**4. Verification is explicit, because the platform will not do it.** Every
+dashboard dataset is executed against the warehouse and every widget field
+reference is cross-checked against the returned columns before the dashboard is
+believed. The Genie space is verified by asking it the actual demo question
+through `genie start-conversation` and reading back the SQL it generated.
+
+### Consequences
+
+- The demo can show a booking made in the app appearing in a dashboard tile
+  seconds later, with the honest explanation that nothing moved the data.
+- Asked "Where and for which movies should we open new functions based on
+  popularity?", the deployed space produced the canonical query from its
+  instructions and answered with Iron Meridian evenings at Downtown (97.1%,
+  78.6% sellout, 14 showtimes, $1,809/showtime) and Lakeview (90.8%) — movie,
+  theater, slot, sample size and value, which is an actionable answer rather
+  than a chart.
+- The dashboard's **rendering** is not machine-verifiable. It was opened, and
+  every tile failed — see *Lakeview's `queryLines`* below. Fixed and redeployed;
+  the datasets are now verified the way the runtime actually executes them.
+- The seed now writes ~22k rows and takes noticeably longer than the old one.
+  Still seconds, but `--reset` is no longer instant.
+- `docs/DATA_MODEL.md` describes the OLTP schema only; the gold tables are
+  described by their own `COMMENT`s, which is what Genie reads.
+
+### Genie's v2 export format, learned by probing
+
+Undocumented in the CLI help and worth recording, since a bundle deploy fails
+on each of them in turn: `serialized_space` requires `"version": 2`;
+`data_sources.tables` **must be sorted by identifier**;
+`instructions.text_instructions` **must be sorted by id** and **must contain at
+most one item**; ids must be lowercase 32-hex without dashes. There is no field
+for sample questions or example SQL in this version, which is why the canonical
+query lives inside the instruction text.
+
+### Lakeview's `queryLines`, learned the hard way
+
+A dataset's `queryLines` are concatenated **with no separator**, and the result
+is then wrapped as `WITH q AS ( <dataset sql> ) SELECT ... FROM q`. Every line
+must therefore carry its own trailing `\n`. Without them the first deploy
+produced `movie_idJOIN`, `current_timestamp()GROUP BY`, `rCROSS JOIN`, and — for
+the one dataset that opened with a `--` comment — a `PARSE_EMPTY_STATEMENT`,
+because the entire query became a single comment line. Every tile on both pages
+failed.
+
+The failure survived the first round of verification because that verification
+was wrong in the same direction as the bug: it joined `queryLines` with `\n`
+before executing them, which is exactly what the runtime does not do. A check
+that reformats its input is not a check. The verification now concatenates with
+`""` and applies the `WITH q AS (...)` wrapper, so it executes character-for-
+character what the dashboard executes — which also exercises the nested-CTE case
+for the datasets that begin with their own `WITH`.
+
+Generalising: the two AI/BI surfaces fail in opposite ways. Genie validates its
+export strictly and rejects a bad definition at deploy time. Lakeview stores
+whatever it is given — an invented `widgetType` returns `200` — so for a
+dashboard the deploy is not evidence of anything, and the only real checks are
+executing each dataset exactly as the runtime will, and looking at the page.
+
+### Alternatives considered
+
+- **Materialise everything and let the dashboard read only Delta.** One code
+  path, but it puts a refresh cycle between the booking and the tile and throws
+  away the most interesting thing the architecture can demonstrate — that the
+  UC registration makes the OLTP store queryable without a pipeline.
+- **Point Genie at the federated Lakebase tables too.** Rejected: two ways to
+  compute occupancy, no column comments on the foreign catalog, and a much
+  larger surface for Genie to get lost in.
+- **Ship an `expansion_candidates` gold table.** Precomputing the recommendation
+  would make the Genie demo a lookup and would read as staged. The ranking lives
+  in Genie's instructions, with the dashboard tile as the fallback if the model
+  wanders live.
+- **Leave the seed uniform and let the panel discount the analytics.** Rejected;
+  see Context. Shaping the distribution and disclosing it is more defensible
+  than presenting noise as a finding.
+- **Author both assets in the workspace UI and only then generate them into the
+  bundle.** The documented round-trip
+  (`databricks bundle generate dashboard | genie-space --resource ... --force`)
+  is still the intended edit loop, but starting from code meant the assets could
+  be built, deployed and verified without a browser.

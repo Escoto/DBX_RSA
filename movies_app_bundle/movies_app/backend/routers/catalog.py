@@ -55,7 +55,7 @@ def list_showtimes(
         sql += " AND t.theater_id = %s"
         params.append(theater_id)
     if date is not None:
-        sql += " AND st.starts_at::date = %s::date"
+        sql += " AND (st.starts_at AT TIME ZONE 'UTC')::date = %s::date"
         params.append(date)
     sql += " ORDER BY st.starts_at, t.name, a.name"
     return db.query(sql, tuple(params) if params else None)

@@ -1,7 +1,7 @@
 resources:
   catalogs:
     movies_analytics:
-      name: ${var.catalog_name}
+      name: ${var.catalog_name}_${bundle.target}
       comment: Catalog for Movies analytics.
       lifecycle:
         prevent_destroy: false # allow destroy on `bundle destroy`.

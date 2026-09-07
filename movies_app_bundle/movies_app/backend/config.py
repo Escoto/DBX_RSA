@@ -20,8 +20,14 @@ PLATFORM_VARS = [
 
 class Settings:
     def __init__(self) -> None:
+        # Fallbacks below only matter if LAKEBASE_* is unset. On the deployed
+        # app these are always injected by resources/app.yml's
+        # apps.movies_app.config.env (bundle-templated per target); locally,
+        # export them per CLAUDE.md §7. The literals here match the `dev`
+        # target's resolved names and are not target-derived -- update them
+        # if the base names or target change and this ever gets hit for real.
         self.lakebase_instance = os.environ.get("LAKEBASE_INSTANCE", "movies-app-dev")
-        self.lakebase_database = os.environ.get("LAKEBASE_DATABASE", "movies")
+        self.lakebase_database = os.environ.get("LAKEBASE_DATABASE", "movies_dev")
         self.lakebase_schema = os.environ.get("LAKEBASE_SCHEMA", "movies")
         self.pghost: str | None = os.environ.get("PGHOST")
         self.pgport = int(os.environ.get("PGPORT", "5432"))

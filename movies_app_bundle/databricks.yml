@@ -9,10 +9,10 @@ variables:
   # -- Lake Base --
   lakebase_instance_name:
     description: Lakebase instance name
-    default: movies-app-dev
+    default: movies-app
   lakebase_catalog:
     description: Unity Catalog catalog name under which the Lakebase database is registered
-    default: movies_app_dev
+    default: movies_app
   lakebase_database:
     description: Postgres database inside the instance that holds the app schema
     default: movies
@@ -20,7 +20,7 @@ variables:
   # -- Lake House --
   catalog_name:
     description: Unity Catalog catalog for Delta analytics tables and the seed job outputs
-    default: movies_analytics_dev
+    default: movies_analytics
   schema_name:
     description: Schema (in var.catalog) for Delta analytics tables
     default: movies

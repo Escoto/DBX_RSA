@@ -4,7 +4,7 @@
 # This file is dev tooling: nothing on the Databricks Apps runtime uses it.
 
 .DEFAULT_GOAL := help
-.PHONY: help setup run_back run_front build
+.PHONY: help setup run_back run_front build test
 
 VENV  := $(HOME)/.venvs/movies-app
 PY    := $(VENV)/bin/python
@@ -45,3 +45,9 @@ run_front: ## Run the Vite dev server on http://localhost:5173 (Windows Node via
 
 build: ## Build the SPA exactly as the Apps deployment does (npm ci, type-check, vite build)
 	@$(NPM) run build
+
+# The gate for backend changes. Needs no credentials and touches no network:
+# backend.db is stubbed, so this runs anywhere, including with Lakebase stopped.
+test: $(STAMP) ## Run the backend test suite (pytest)
+	@$(PIP) install -q -r requirements-dev.txt
+	@$(PY) -m pytest

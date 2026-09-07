@@ -35,7 +35,7 @@ Evaluation: "a builder who ships, thinks in trade-offs, and can defend a design"
 
 ---
 
-## 2. Current state (2026-09-06)
+## 2. Current state (2026-09-07)
 
 **Deployed by the bundle** (direct engine, CLI 1.15.0), verified with
 `bundle summary -t dev`. Details in §10.
@@ -49,29 +49,41 @@ Evaluation: "a builder who ships, thinks in trade-offs, and can defend a design"
 | SQL warehouse `movies_analytics` | `sql_warehouses.movies_analytics_warehouse` | `resources/lakehouse.yml` |
 | App `movies-app` | `apps.movies_app` | `resources/app.yml` |
 
-**Phases 1–4 complete.** App resource + FastAPI skeleton; `src/seed/ddl.sql`
+**Phases 1–5 complete.** App resource + FastAPI skeleton; `src/seed/ddl.sql`
 (7 tables, 8 FKs of which 3 composite, 5 unique constraints, 11 checks) and
 `src/seed/seed_lakebase.py` applied to the live instance; backend routers,
-`booking_service`, and 6 pytest cases; the Vue SPA with all four routes. The
-full click path — grid → movie → theater → seat map → book → 409 on a raced
-seat → confirmation — was verified locally against the live Lakebase, and
-bookings are visible in `movies_app_dev.movies.booking_seats`. Per-phase
-verification detail lives in `docs/AI_USAGE_LOG.md` and `docs/DECISIONS.md`.
+`booking_service`, and the Vue SPA with all four routes. The full click path —
+grid → movie → theater → seat map → book → 409 on a raced seat → confirmation —
+is verified **on the deployed app**, and bookings are visible in
+`movies_app_dev.movies.booking_seats`. Per-phase verification detail lives in
+`docs/AI_USAGE_LOG.md` and `docs/DECISIONS.md`.
 
-**Phase 5 in progress.** The deployed app returned 500 on every `/api/*` call
-touching Lakebase. Root cause (ADR-005): the platform does **not** inject
-`PGHOST`, so `db.py` fell back to `get_database_instance()` over the workspace
-API, and the app SP lacked workspace-level `CAN_USE` on the instance (the
-`database` app resource creates the Postgres role but not the workspace ACL).
-Fix: `PGHOST` with `valueFrom: lakebase` in `app.yaml`. Also fixed a psycopg 3
-connection leak in `query()`/`execute()`, added `PGPASSWORD` support,
-step-by-step diagnostics in `/api/health`, and a global exception handler.
-**These changes are local and uncommitted on branch `pghost`** — pending
-`bundle deploy` + `bundle run movies_app` and end-to-end verification.
+Phase 5 also resolved the deployed app's 500s on every `/api/*` call touching
+Lakebase. Root cause (ADR-005): the platform does **not** inject `PGHOST`, so
+`db.py` fell back to `get_database_instance()` over the workspace API, which
+the app SP cannot call. Fix: `PGHOST` with `valueFrom: lakebase` in `app.yaml`,
+plus a psycopg 3 connection-leak fix, `PGPASSWORD` support, step-by-step
+`/api/health` diagnostics, and a global exception handler. Connection pooling
+followed (ADR-006), which required turning every `/api` handler from
+`async def` into `def`. All of this is merged to `main`.
 
-**Not built:** Phase 5 on-platform verification, `analytics_job` +
-`src/analytics/gold.sql` (Phase 6), and `docs/ARCHITECTURE.md`,
-`docs/SCALE_TO_MILLIONS.md`, `docs/DEMO_SCRIPT.md`.
+**Phase 6 in progress.** Repository review; the pytest suite went from 7 to 91
+cases (routers, app shell, `/api/health`, `db.py`) with `pytest.ini` and a
+`make test` target; a real bug fixed (the SPA 404 handler was discarding the
+routers' 404 details); ADR-006 rewritten after shipping literal control
+characters; ADR-007 records cancellation as cut.
+
+**Not built:** `analytics_job` + `src/analytics/gold.sql`, `docs/DEMO_SCRIPT.md`
+(with `docs/img/` screenshots), and `docs/ARCHITECTURE.md` /
+`docs/SCALE_TO_MILLIONS.md` — most of whose content already lives in
+`README.md`; decide whether to write the files or drop the promises at
+README:143 and README:326.
+
+**Two demo traps.** (1) Seeded showtime ids are `now`-relative and
+`/api/showtimes` filters `starts_at > now()`, so the schedule shrinks daily and
+is **empty seven days after the last seed** — always re-seed with `--reset`
+before the demo. (2) Both the Lakebase instance and the app compute are stopped
+between sessions; start both ≥15 min ahead.
 
 ### Hazards (live)
 
@@ -110,7 +122,7 @@ step-by-step diagnostics in `/api/health`, and a global exception handler.
 | App → DB auth | App connects as its **own service principal** with an OAuth token from `generate_database_credential`; the `database` app resource (`CAN_CONNECT_AND_CREATE`) creates the Postgres role | No passwords; tokens live ~1 h, refreshed by the backend |
 | Double-booking | `UNIQUE (showtime_id, seat_id)` on `booking_seats` + the whole booking in **one transaction**; unique violation → rollback → `409` with the taken seats | The database enforces the invariant; the app only translates errors |
 | Seat holds / timers | **Out of scope** (stretch: `seat_holds` with `expires_at` + sweeper) | Not needed for the walking skeleton |
-| Cancellations | Stretch: `DELETE /api/bookings/{id}` marks the header `CANCELLED` and deletes its seat rows | Keeps the UNIQUE constraint simple |
+| Cancellations | **Cut** (ADR-007). The schema still supports it: `status` + `cancelled_at` with a CHECK keeping them in step, and `booking_seats` cascades on delete | The UNIQUE constraint lives on `booking_seats`, not on a status-aware partial index, precisely so deleting seat rows frees the seats while the header survives as an audit trail |
 | Pricing | Per showtime: `price_standard`, `price_premium`; seat types `standard`/`premium`/`accessible` (accessible priced as standard) | Simple, shows a non-trivial join |
 | Theaters | Several theaters, 1–2 auditoriums each; one auditorium per showtime | Enough to show "pick a theater" |
 | Auth / payments | None. A booking captures `customer_name` + `customer_email` and is confirmed immediately | Brief excludes both |
@@ -225,7 +237,7 @@ two.
 | GET | `/api/showtimes/{id}/seats` | `{showtime, rows: [{row_label, seats: [...]}]}` |
 | POST | `/api/bookings` | 201 `Booking` / 409 `{detail, taken_seat_ids}` / 422 |
 | GET | `/api/bookings/{id}` | `Booking` with seats |
-| DELETE | `/api/bookings/{id}` | stretch: cancel |
+| ~~DELETE~~ | ~~`/api/bookings/{id}`~~ | **not built** — cancellation cut, ADR-007 |
 
 Frontend routes: `/` (movies grid) → `/movies/:id` (theater picker +
 showtimes) → `/showtimes/:id` (seat map + customer form) → `/bookings/:id`
@@ -276,8 +288,9 @@ running `src/analytics/gold.sql`
 The panel-facing tree is in `README.md`. What matters for editing:
 
 ```
-docs/            DATA_MODEL.md, DECISIONS.md, AI_USAGE_LOG.md exist;
-                 ARCHITECTURE.md, SCALE_TO_MILLIONS.md, DEMO_SCRIPT.md to write (§9)
+docs/            DATA_MODEL.md, DECISIONS.md (ADR-001..007), AI_USAGE_LOG.md exist;
+                 DEMO_SCRIPT.md to write; ARCHITECTURE.md / SCALE_TO_MILLIONS.md
+                 to write or to drop from the README's promises (§9)
 .claude/         settings.json (git denied), agents/databricks-engineer/, commands/build-check.md
 movies_app_bundle/
 ├── databricks.yml           engine: direct, variables, target
@@ -287,29 +300,36 @@ movies_app_bundle/
 └── movies_app/              App source_code_path
     ├── app.yaml, package.json, requirements.txt, requirements-dev.txt, Makefile
     ├── backend/  (§4.2)     frontend/  Vue 3 + Vite + TS
-    └── tests/               pytest: booking_service with a fake connection
+    ├── pytest.ini           testpaths, pythonpath; `make test` is the gate
+    └── tests/               91 cases. Only backend.db is stubbed, so they need
+                             no credentials and pass with Lakebase stopped
 ```
 
 ---
 
 ## 6. Build plan
 
-Phases 1–4 are complete (§2). Do not start a phase before the previous
+Phases 1–5 are complete (§2). Do not start a phase before the previous
 done-check passes.
 
-**Phase 5 — Deploy + verify on platform (~30 min).** `bundle deploy`, then
-`bundle run movies_app`, open the app URL, complete a booking, show the row in
-Catalog Explorer (`movies_app_dev.movies.booking_seats`) and via the SQL editor
-on `movies_analytics`. Write `docs/DEMO_SCRIPT.md`.
-*Done-check:* a booking made through the **deployed** app is visible in Unity
-Catalog; `/api/health` reports `db: connected`.
+**Phase 6 — remaining artifacts (~45 min).** In order:
 
-**Phase 6 — Interview artifacts, then stretch (~45 min).** Finalize
-`docs/ARCHITECTURE.md`, `docs/SCALE_TO_MILLIONS.md`, `docs/DECISIONS.md`,
-`docs/AI_USAGE_LOG.md`. Then, only if time remains, in order:
-1. `analytics_job` (sql_task → Delta gold tables), run once, show the tables.
-2. Cancellation endpoint.
-3. Seat holds with expiry.
+1. `analytics_job` + `src/analytics/gold.sql` (sql_task → Delta gold tables),
+   run once, show the tables in Catalog Explorer. The last unbuilt piece of the
+   architecture the README already describes.
+2. `docs/DEMO_SCRIPT.md`, with the re-seed and the two compute starts as step
+   zero, plus `docs/img/` screenshots as the offline backup.
+3. Decide `docs/ARCHITECTURE.md` / `docs/SCALE_TO_MILLIONS.md`: write them, or
+   drop the "still to be written" promises at README:143 and README:326. Most
+   of that content is already in the README.
+
+*Done-check:* `bundle run analytics_job` succeeds and both gold tables have
+rows; a cold reader can follow `DEMO_SCRIPT.md` to a booking without asking a
+question.
+
+**Cut, not deferred:** cancellation (ADR-007). **Still deferred:** seat holds
+with expiry, idempotency keys, and the seven pooling items in ADR-006's
+*Deferred* table.
 
 ---
 
@@ -402,23 +422,32 @@ Python 3.11 — avoid 3.12+ only syntax.**
 
 ## 9. Interview artifacts (docs/)
 
-Existing: `DATA_MODEL.md` (ERD + constraint notes), `DECISIONS.md` (ADR-001…005),
-`AI_USAGE_LOG.md` (R8, running log).
+Existing: `DATA_MODEL.md` (ERD + constraint notes), `DECISIONS.md`
+(ADR-001…007), `AI_USAGE_LOG.md` (R8, running log, Phases 1–6).
 
 To write:
+
+- **`DEMO_SCRIPT.md`** — 5-minute path: open app → movie → theater → seat map →
+  book 2 seats → show the row in Catalog Explorer → re-book the same seats →
+  409 → show the bundle resources. Backup: screenshots in `docs/img/`.
+  **Step zero is the pre-flight**: re-seed with `--reset` (the showtime window
+  expires), start the Lakebase instance and the app compute ≥15 min ahead, then
+  confirm `/api/health` reports `db: connected`.
+
+To write *or* to drop — the README already carries most of both, so the choice
+is to expand them into files or to delete the "still to be written" promises at
+README:143 and README:326. Do not leave the promises pointing at nothing:
 
 - **`ARCHITECTURE.md`** — one mermaid diagram (browser → app → Lakebase → UC →
   Delta) and one table of Databricks services chosen vs alternatives (Apps vs
   external hosting; Lakebase vs Delta-on-warehouse for OLTP; UC registration vs
   ETL; sql_task vs Lakeflow Declarative Pipeline; DAB direct engine).
+  README §Architecture already has the diagram and the table.
 - **`SCALE_TO_MILLIONS.md`** — one page. Lakebase capacity (CU_2→CU_8, readable
   secondaries, child instances), seat holds with TTL, idempotency keys,
   connection pooling, CDN + horizontal API scaling, synced tables, Lakeflow +
   Delta for analytics, AI/BI dashboards, multi-region, system-table
-  observability.
-- **`DEMO_SCRIPT.md`** — 5-minute path: open app → movie → theater → seat map →
-  book 2 seats → show the row in Catalog Explorer → re-book the same seats →
-  409 → show the bundle resources. Backup: screenshots in `docs/img/`.
+  observability. README §Taking it to millions already has the prose.
 
 ---
 

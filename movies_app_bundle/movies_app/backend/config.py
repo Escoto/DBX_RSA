@@ -41,6 +41,28 @@ class Settings:
         self.pg_pool_enabled = (
             os.environ.get("PG_POOL_ENABLED", "true").lower() == "true"
         )
+        # Seconds a thread waits for a pooled connection before psycopg_pool
+        # raises PoolTimeout. Was a literal `timeout=10` inside db.py's
+        # ConnectionPool(...); pulled out here so it can be reasoned about,
+        # tuned, and tested alongside pool and threadpool size (ADR-008).
+        self.pg_pool_timeout = float(os.environ.get("PG_POOL_TIMEOUT", "10"))
+
+        # FastAPI runs every sync `def` handler in anyio's threadpool, default
+        # 40 threads -- a number with no relationship to this app's pool of
+        # PG_POOL_MAX=10 connections. Left alone, up to 40 requests can be
+        # admitted at once, each thread then queuing for one of 10 connections
+        # and parking for up to PG_POOL_TIMEOUT seconds before PoolTimeout.
+        # Sizing the threadpool to pg_pool_max plus a small headroom (ADR-008)
+        # means almost every admitted thread finds a connection immediately,
+        # and any concurrency beyond that queues cheaply as a suspended
+        # coroutine waiting for a thread token -- no OS thread, no contention
+        # on the pool's own wait queue -- instead of piling up inside
+        # psycopg_pool for the full timeout. The headroom covers blocking work
+        # that does not go through the pool, chiefly /api/health's direct
+        # get_connection() call.
+        self.api_thread_pool_size = int(
+            os.environ.get("API_THREAD_POOL_SIZE", str(self.pg_pool_max + 4))
+        )
 
     def log_platform_vars(self) -> None:
         present = [v for v in PLATFORM_VARS if os.environ.get(v)]

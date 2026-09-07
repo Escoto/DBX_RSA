@@ -67,11 +67,14 @@ plus a psycopg 3 connection-leak fix, `PGPASSWORD` support, step-by-step
 followed (ADR-006), which required turning every `/api` handler from
 `async def` into `def`. All of this is merged to `main`.
 
-**Phase 6 in progress.** Repository review; the pytest suite went from 7 to 91
-cases (routers, app shell, `/api/health`, `db.py`) with `pytest.ini` and a
-`make test` target; a real bug fixed (the SPA 404 handler was discarding the
-routers' 404 details); ADR-006 rewritten after shipping literal control
-characters; ADR-007 records cancellation as cut.
+**Phase 6 in progress.** Repository review; the pytest suite went from 7 to 107
+cases (routers, app shell, `/api/health`, `db.py`, pool backpressure) with
+`pytest.ini` and a `make test` target; a real bug fixed (the SPA 404 handler
+was discarding the routers' 404 details); ADR-006 rewritten after shipping
+literal control characters; ADR-007 records cancellation as cut; ADR-008
+closes ADR-006 Deferred item 5 — the API threadpool is now sized from
+`pg_pool_max` rather than anyio's default, and a saturated pool returns `503`
++ `Retry-After` instead of a `500`.
 
 **Not built:** `analytics_job` + `src/analytics/gold.sql`, `docs/DEMO_SCRIPT.md`
 (with `docs/img/` screenshots), and `docs/ARCHITECTURE.md` /
@@ -301,7 +304,7 @@ movies_app_bundle/
     ├── app.yaml, package.json, requirements.txt, requirements-dev.txt, Makefile
     ├── backend/  (§4.2)     frontend/  Vue 3 + Vite + TS
     ├── pytest.ini           testpaths, pythonpath; `make test` is the gate
-    └── tests/               91 cases. Only backend.db is stubbed, so they need
+    └── tests/               107 cases. Only backend.db is stubbed, so they need
                              no credentials and pass with Lakebase stopped
 ```
 

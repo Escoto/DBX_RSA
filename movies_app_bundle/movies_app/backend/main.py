@@ -4,6 +4,8 @@ import logging
 import os
 from pathlib import Path
 
+import anyio.to_thread
+import psycopg_pool
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,10 +18,44 @@ logger = logging.getLogger(__name__)
 
 from contextlib import asynccontextmanager
 
+# How long a 503 from a saturated pool asks the client to wait before
+# retrying. Deliberately short and fixed, not pg_pool_timeout itself: a
+# request already waited up to pg_pool_timeout for a connection before this
+# fires, so telling it to wait that long again would compound the latency
+# instead of giving the pool a chance to drain (ADR-008).
+POOL_RETRY_AFTER_SECONDS = 2
+
+
+def _configure_thread_pool() -> int:
+    """Bind FastAPI's sync-handler threadpool to the Lakebase pool it feeds.
+
+    Must run inside a running event loop -- anyio scopes the limiter to the
+    current loop, so this is called from the lifespan below, on the loop that
+    goes on to serve requests. See config.py and ADR-008 for the sizing
+    rationale.
+    """
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    limiter.total_tokens = settings.api_thread_pool_size
+    if settings.api_thread_pool_size < settings.pg_pool_max:
+        logger.warning(
+            "api_thread_pool_size=%d is smaller than pg_pool_max=%d; "
+            "pooled connections will sit idle under concurrent load",
+            settings.api_thread_pool_size,
+            settings.pg_pool_max,
+        )
+    logger.info(
+        "Threadpool sized to %d threads (pg_pool_max=%d, pg_pool_timeout=%ss)",
+        settings.api_thread_pool_size,
+        settings.pg_pool_max,
+        settings.pg_pool_timeout,
+    )
+    return settings.api_thread_pool_size
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.log_platform_vars()
+    _configure_thread_pool()
     logger.info(
         "instance=%s database=%s schema=%s dist_exists=%s",
         settings.lakebase_instance,
@@ -60,6 +96,30 @@ app = FastAPI(title="Movies Booking API", lifespan=lifespan)
 DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
+@app.exception_handler(psycopg_pool.PoolTimeout)
+async def _pool_saturated(
+    request: Request, exc: psycopg_pool.PoolTimeout
+) -> JSONResponse:
+    # Every pooled connection was checked out for longer than pg_pool_timeout.
+    # That is the pool correctly refusing to over-admit work, not a server
+    # fault, so it gets a 503 + Retry-After rather than falling into the
+    # catch-all 500 below (ADR-008). Registered separately from the generic
+    # handler; Starlette resolves by the exception's MRO, so this fires
+    # instead of it regardless of registration order.
+    logger.warning("Pool saturated on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(POOL_RETRY_AFTER_SECONDS)},
+        content={
+            "detail": (
+                "Service is busy -- the database connection pool is "
+                "saturated. Retry shortly."
+            ),
+            "error": "PoolTimeout",
+        },
+    )
+
+
 @app.exception_handler(Exception)
 async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:
     if request.url.path.startswith("/api"):
@@ -91,6 +151,10 @@ def health() -> dict:
         "pguser_injected": settings.pguser is not None,
         "pgpassword_injected": settings.pgpassword is not None,
         "client_id_set": bool(os.environ.get("DATABRICKS_CLIENT_ID")),
+        # The ADR-008 relationship, visible at runtime and not just in code.
+        "pg_pool_max": settings.pg_pool_max,
+        "pg_pool_timeout": settings.pg_pool_timeout,
+        "api_thread_pool_size": settings.api_thread_pool_size,
     }
 
     # Step 0: WorkspaceClient auth type

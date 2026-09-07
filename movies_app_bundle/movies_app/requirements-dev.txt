@@ -1,2 +1,4 @@
 -r requirements.txt
 pytest>=7.0.0
+# fastapi.testclient is a thin wrapper over httpx; FastAPI does not pull it in.
+httpx>=0.27.0

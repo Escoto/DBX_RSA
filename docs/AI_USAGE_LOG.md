@@ -298,16 +298,23 @@ design tokens, review).
 - The bug report with structured debug steps.
 - The standing constraints: WSL for Databricks CLI, no `bundle destroy`, no
   Windows CLI.
-- Deployment and verification against the live platform (pending).
+- Deployment and verification against the live platform.
 
-**Verification (pending):**
+**Verification (done, by the human on the deployed app):**
 
 - `bundle deploy -t dev` then `bundle run movies_app -t dev`
-- Open the app URL, hit `/api/health` — expect `status: ok`,
-  `pghost_injected: true`, `db: connected`
-- Complete a booking end to end: grid → movie → seat map → 201
-- Confirm the booking row in Catalog Explorer
-  (`movies_app_dev.movies.booking_seats`)
+- `/api/health` returned `pghost_injected: true` and `db: connected`,
+  confirming the ADR-005 root cause: the SP never needed the workspace API
+  once the host arrived through `valueFrom`
+- The booking flow completed end to end through the deployed app
+- Smoke-tested again on 2026-09-07 with the pooled build: `/api/health`
+  reported three live connections after a browse-and-book session
+
+The one thing AI could not do here is the thing that closed the bug. The
+diagnosis was reached without ever seeing the failure — Databricks Apps
+requires OAuth for both the app URL and `apps logs`, and the CLI profile is a
+PAT, so every hypothesis was built from the Lakebase side, the resource
+definitions and the platform docs, then handed to the human to confirm.
 
 **Rough split:** ~90% AI (investigation, docs lookup, root cause, fix), ~10%
 human (bug report, deployment).
@@ -383,21 +390,104 @@ request through the loop, threadpool, pool and Lakebase, with prose on why the
 handlers are sync. The *Taking it to millions* section still listed connection
 pooling as future work and was corrected.
 
-**Still open, deliberately deferred:** `max_lifetime` is measured from connect
-time rather than token issuance, so a connection can outlive its credential;
-`/api/health` has two identical `if/else` branches and therefore never exercises
-the pool it reports on; `PG_POOL_*` is absent from `app.yaml`, so the documented
-fallback needs a redeploy anyway; ADR-006's control characters; the
-`connect_timeout` clobber; a wildcard version pin; and the duplicated non-pool
-branches in the three `db.py` helpers.
+**Still open, deliberately deferred.** Seven pooling issues were logged rather
+than fixed; they now live as the *Deferred* table in ADR-006 so the decision
+record carries them instead of a build log nobody re-reads. The wildcard pin on
+`psycopg-pool` and ADR-006's control characters were separate defects, both
+closed in Phase 6.
 
 **Two AI failures worth logging.** ADR-006 was written through a shell with
 escaped backticks and shipped literal control characters (0x08, 0x09, 0x1B) into
-a panel-facing document — exactly the quoting hazard CLAUDE.md §11 warns about,
-and still uncorrected. Separately, `sed -i` silently stripped the CRLF line
+a panel-facing document — exactly the quoting hazard CLAUDE.md §11 warns about.
+It survived a full code review and a human read before being caught in Phase 6;
+the lesson recorded in §11 was right, and following it is what was missing.
+Separately, `sed -i` silently stripped the CRLF line
 endings from `main.py`, turning a one-word change into a 188-line diff; caught in
 review of the diff and restored.
 
 **Rough split:** ~85% AI (plan, review, fix, measurement, docs), ~15% human (the
 two optimisations to pursue, the scope call to fix only the blocking issue,
 deployment and on-platform verification).
+
+---
+
+## Phase 6 — Review, test suite, doc repair (2026-09-07)
+
+**Where this started.** The human asked for a code review of the whole
+repository against CLAUDE.md, delivered as two tables: what is done with a
+completion percentage, and what looks like a bug. Then they triaged the result
+themselves — cancellation cut, pooling cleanups deferred, tests promoted to the
+priority — and handed back a scoped list. That triage is the human contribution
+that mattered most in this phase: the review surfaced twenty items, and the
+decision about which five to act on was not one AI made.
+
+**The review.** AI read every source file, ran the existing suite, ran
+`vue-tsc --noEmit`, and checked the deployed state with `databricks apps get`.
+It produced a 20-row completion table and a 17-row defect table ordered by
+severity. Findings that mattered:
+
+- **ADR-006 contained literal control characters** (0x08, 0x09, 0x1B) and
+  stray backslashes where backticks belonged — a corrupted panel-facing
+  document, logged as a known AI failure in the Phase 5 addendum and still
+  unfixed. Caught here by grepping every doc for bytes below 0x20 rather than
+  by reading, which is why a human read had missed it twice.
+- **The seeded showtime window expires.** Showtime ids are `now`-relative and
+  `/api/showtimes` filters `starts_at > now()`, so the schedule shrinks by one
+  day every day and is empty seven days after the last seed. A demo-blocking
+  issue that no test and no type check would ever surface.
+- **The deployed app's compute is stopped** alongside the paused Lakebase —
+  correct cost control, but with nothing in the repo saying so.
+- Seven pooling issues already known from Phase 5, plus a wildcard version pin
+  and three documents contradicting each other about what was verified.
+
+**The test suite.** The suite went from 7 tests to 91, covering the three
+routers, the app shell, `/api/health`, and `backend/db.py`. Only `backend.db`
+is stubbed, so the tests run the real routing, the real Pydantic models and the
+real error translation, and they need no credentials — they pass with Lakebase
+stopped, which is the state the repository is usually in.
+
+Two groups are regression guards rather than coverage:
+
+- **The ADR-005 leak.** `query()`, `execute()` and `transaction()` are asserted
+  to close their connection, including on the exception path. A leak never
+  fails a test by itself — it exhausts the server hours later — so the
+  assertion has to be explicit.
+- **Credential precedence.** `PGHOST` over the workspace API, `PGUSER` over
+  `DATABRICKS_CLIENT_ID` over the signed-in user, `PGPASSWORD` over
+  `generate_database_credential`. ADR-005 was one of those rules being wrong on
+  the platform and right locally, so each branch is now pinned.
+
+**One real bug, found by a test rather than by reading.** The first router test
+written asserted that `GET /api/movies/{unknown}` returns `"Movie not found"`.
+It returned `"Not found"`. The SPA 404 handler — which exists to serve
+`index.html` for vue-router deep links — also catches the routers' own
+`HTTPException(404, ...)` and was discarding their detail, so every API 404 in
+the application reached the SPA as one generic string. Fixed by passing the
+original detail through. AI had read that handler twice during the review and
+reasoned about its interaction with the StaticFiles mount without noticing;
+writing an assertion about the response body found it in one run.
+
+**Mutation testing, because 91 passing tests prove nothing on their own.** Seven
+deliberate defects were introduced one at a time and the suite re-run: dropping
+the past-showtime filter, inverting premium pricing, reintroducing the ADR-005
+leak, disabling token refresh, flattening the 404 details, removing the
+1..8 seat cap, and recycling connections after the token dies. Six were caught
+immediately. **The token-refresh mutant survived** — the test stepped time
+relative to `TOKEN_LIFETIME_SECONDS`, so raising the constant moved the
+goalposts with it and the test still passed. Fixed by adding an absolute bound
+on the constant. That mutant is the reason the exercise was worth running: it
+was the one test that looked most rigorous and was in fact circular.
+
+**What was fixed.** The 404 detail bug; ADR-006 rewritten with the Write tool
+rather than through a shell; the wildcard pin on `psycopg-pool` replaced with
+the 3.2.8 that the verified deployment actually resolved to; `pytest.ini` and a
+`make test` target so the gate is one command; `httpx` declared in
+`requirements-dev.txt` (`fastapi.testclient` needs it and FastAPI does not pull
+it in); three documents reconciled about what was verified on-platform.
+
+**What was deliberately not fixed.** The seven pooling issues, now recorded as
+the *Deferred* table in ADR-006 with a reason each. Cancellation, now ADR-007.
+
+**Rough split:** ~85% AI (review, tests, mutation testing, doc repair), ~15%
+human (the triage that scoped this phase, the smoke test on the deployed app,
+the call to defer pooling and cut cancellation).

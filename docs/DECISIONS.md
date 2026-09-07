@@ -311,26 +311,157 @@ Three changes:
 
 ---
 
-## ADR-006 — Connection pooling with dynamic credentials
+## ADR-006 — Pool connections while the credential keeps rotating
 
-**Date:** 2026-09-06 · **Phase:** 5 · **Status:** accepted · **Changes:** \ackend/db.py\, \ackend/main.py\, \ackend/config.py\, \CLAUDE.md\
+**Date:** 2026-09-06 · **Phase:** 5 · **Status:** accepted · **Changes:** `backend/db.py`, `backend/main.py`, `backend/config.py`, CLAUDE.md §4.2
 
 ### Context
 
-The application connects to Lakebase using an OAuth token generated via \generate_database_credential()\, which is valid for approximately one hour. Initially, the application used a "one connection per request" strategy because connection pooling with static kwargs would capture a token at pool initialization, leading to authentication failures after the token expires (typically within an hour). However, for production scale, opening a new Postgres connection per request introduces significant latency overhead.
+The app authenticates to Lakebase with an OAuth token from
+`generate_database_credential()`, valid for roughly an hour. The original
+`db.py` opened one connection per request and closed it afterwards, which made
+the credential question trivial — mint a token, connect, done — at the cost of
+a full TCP + TLS + authentication handshake on every API call. Against a
+managed Postgres over TLS that is tens of milliseconds of pure overhead on a
+seat-map read that itself takes single-digit milliseconds.
+
+Pooling is the standard answer, but the usual pooling recipe assumes a static
+password supplied once when the pool is constructed. Here the password is a
+short-lived token that rotates, so a pool built the ordinary way would cache a
+credential at construction time and start failing about an hour later — the
+worst kind of failure for a demo, because it works perfectly right up until it
+does not.
 
 ### Decision
 
-Implement connection pooling using \psycopg_pool.ConnectionPool\, but handle the dynamic nature of the credentials by subclassing \psycopg.Connection\. 
+Use `psycopg_pool.ConnectionPool`, and move credential resolution from pool
+construction to connection construction.
 
-1. **Custom Connection Class:** Created \_LakebaseConnection\ inheriting from \psycopg.Connection\. By overriding the \connect()\ classmethod, the token is fetched dynamically *every time the pool opens a new connection*. This leverages the existing 50-minute token cache cleanly.
-2. **Pool Lifecycle:** \ConnectionPool\ is instantiated lazily and hooked into FastAPI's \lifespan\ context manager so it safely opens on startup (\wait=False\ to prevent crashing on DB unavailability) and closes on shutdown.
-3. **Pool Settings:** Configured with \max_lifetime=45*60\ to ensure connections are recycled *before* the 50-minute token cache rotation, avoiding any risk of a connection outliving its underlying credential logic.
-4. **Fallback Hatch:** Introduced a \PG_POOL_ENABLED\ (default \	rue\) environment variable. If pooling fails in the Apps environment, flipping this variable reverts to the direct-connect path without requiring a code change.
+1. **Custom connection class.** `_LakebaseConnection` subclasses
+   `psycopg.Connection` and overrides the `connect()` classmethod, which is
+   what the pool calls whenever it needs a new physical connection. Host, user
+   and token are resolved *inside* that call, so every connection the pool
+   opens — at startup, when growing under load, and when replacing an expired
+   one — gets a currently valid token. The pool never sees a credential.
+
+2. **Lifecycle in the FastAPI lifespan.** The pool is created lazily and opened
+   on startup with `wait=False`, so an unreachable database delays connections
+   rather than preventing the app from starting. It is closed on shutdown.
+
+3. **Recycle before the token rotates.** `max_lifetime=45 min` sits below the
+   50-minute token cache window in `_get_token()`, which in turn sits below the
+   ~60-minute credential validity. A connection is therefore retired while its
+   credential is still good.
+
+4. **An escape hatch.** `PG_POOL_ENABLED` (default `true`) reverts to the
+   one-connection-per-request path. If pooling misbehaves on the Apps runtime,
+   the old behaviour is one environment variable away.
+
+The handlers had to change too. Every `/api` route was `async def` while
+calling blocking psycopg, so the whole application serialised on the single
+event-loop thread and no more than one pooled connection could ever be checked
+out — `max_size: 10` was decoration. The routes are now sync `def`, which makes
+FastAPI run them in its threadpool. `tests/test_handlers_nonblocking.py` fails
+if one turns back into a coroutine.
+
+Making the handlers concurrent for the first time also made `db.py`'s module
+caches (`_ws`, `_host`, `_token`, `_pool`) genuinely shared. They are guarded
+by an `RLock` — re-entrant because `_get_token()` holds the lock and calls
+`_client()`, which takes it again; a plain `Lock` would deadlock against
+itself. Those races existed all along but were unreachable while everything ran
+on one thread.
+
+The pool stays synchronous. An `AsyncConnectionPool` would have to run the
+blocking Databricks SDK calls inside `connect()`, putting the block back on the
+event loop where it hurts most.
 
 ### Consequences
 
-- **Performance:** Connection establishment overhead is removed from the critical path of each API request.
-- **Robustness:** Token rotation happens seamlessly as the pool scales or recycles older connections.
-- **Observability:** Added \pool.get_stats()\ to \/api/health\ so the live pool state (size, available, waiting) is visible in the Databricks Apps environment.
-- **Code Clarity:** The \	ransaction()\, \query()\, and \xecute()\ helpers were updated to use the pool's context manager, natively inheriting its strict rollback-on-exception and clean return-to-pool guarantees.
+- The handshake leaves the critical path. Measured on the real ASGI app, four
+  concurrent 300 ms queries went from 1.21 s to 0.32 s; reverting a single
+  handler to `async def` restores the 1.21 s.
+- On the deployed app a full browse-and-book session used three physical
+  connections. The pool grew past `min_size`, which `psycopg_pool` only does
+  when every existing connection is checked out — so requests genuinely
+  overlapped on the platform — and every connection came back, including
+  through the rollback path.
+- `/api/health` reports `pool.get_stats()`, so pool state is visible without
+  runtime log access.
+- The app is now sensitive to a setting it did not have before: pool exhaustion
+  is a new failure mode (see *Deferred* below).
+
+### Alternatives considered
+
+- **A static Postgres password.** Native password login is disabled on the
+  instance, and CLAUDE.md §8.4 rules out storing one. `PGPASSWORD` is supported
+  as a documented fallback but is not used.
+- **Refresh the token on a background timer and rebuild the pool.** More moving
+  parts, a window where the pool holds a dead credential, and it still needs
+  the per-connection hook to be correct.
+- **`AsyncConnectionPool` with async handlers.** Rejected above: the SDK calls
+  are blocking, so this moves the block onto the event loop.
+- **No pooling.** The honest baseline, and what `PG_POOL_ENABLED=false` still
+  gives. Correct, just slower per request.
+
+### Deferred
+
+Known and accepted for the prototype, in rough priority order. None of these
+affect the demo path; all are cheap to fix if pooling is revisited.
+
+| # | Issue | Why it is tolerable now |
+|---|-------|-------------------------|
+| 1 | `/api/health` has two identical `if/else` branches and always opens a direct connection, so it never exercises the pool it reports on | The stats it prints still come from the real pool; only the `SELECT 1` bypasses it |
+| 2 | `get_stats()` on an unopened pool still reports `pool_size: 2`, so a `PoolClosed` pool reads as healthy | The lifespan opens the pool; a closed pool means the app failed to start |
+| 3 | `_LakebaseConnection.connect()` sets `connect_timeout=15` unconditionally, clobbering the per-attempt timeout `psycopg_pool` passes in | Only matters when the host is slow enough to exceed the pool's own 10 s budget |
+| 4 | `max_lifetime` counts from connect time, not from token issuance, so a connection can in principle outlive its credential | The 45 / 50 / 60-minute margins absorb it |
+| 5 | FastAPI's threadpool is 40 threads against `max_size: 10` with `timeout: 10`, so heavy load raises `PoolTimeout` → 500 rather than a graceful 503 | Demo traffic is one browser |
+| 6 | `PG_POOL_*` is absent from `app.yaml`, so the escape hatch needs a redeploy anyway | A redeploy is two minutes |
+| 7 | `execute()` is unused, and the `if not pg_pool_enabled` branch is duplicated across all three helpers in `db.py` | Dead code, not wrong code |
+
+---
+
+## ADR-007 — Drop the cancellation endpoint from scope
+
+**Date:** 2026-09-07 · **Phase:** 6 · **Status:** accepted · **Changes:** CLAUDE.md §3, §4.5
+
+### Context
+
+`DELETE /api/bookings/{id}` was carried through the whole build as a stretch
+item: CLAUDE.md §4.5 lists it in the API contract, the schema already supports
+it (`bookings.status`, `cancelled_at`, and the `ck_bookings_cancelled_at` check
+that keeps the two in step; `booking_seats` cascades on delete so cancelling
+frees the seats), and the frontend already renders a `CANCELLED` booking.
+
+It was never implemented. With the remaining budget going to the analytics job
+and the interview artifacts, the choice is to build it or to stop listing it.
+
+### Decision
+
+Cancellation is out of scope. The endpoint will not be built.
+
+The schema support stays exactly as it is. It costs nothing, it is already
+deployed, and it is the honest answer to "how would you cancel?" — the design
+question the panel is likely to ask is about the *data model*, and the model
+already answers it: the unique constraint lives on `booking_seats` rather than
+on a status-aware partial index precisely so that deleting seat rows frees the
+seats while the header survives as an audit trail.
+
+### Consequences
+
+- One less endpoint than CLAUDE.md §4.5 advertises. That section and the
+  README's API table both need the row marked as not built rather than
+  "stretch".
+- `GET /api/bookings/{id}` still reads a cancelled row correctly, and there is
+  a test for it, so a row cancelled by hand in SQL demonstrates the flow end to
+  end without an endpoint.
+- Nothing in the write path or the seat map assumes bookings are immortal.
+
+### Alternatives considered
+
+- **Build it anyway.** It is genuinely small — one `UPDATE ... RETURNING` plus
+  a `DELETE`, inside the existing `transaction()` helper. Rejected on budget:
+  the analytics job is the last unbuilt piece of the *stated* architecture, and
+  a missing gold table is a bigger hole in the story than a missing DELETE.
+- **Leave it listed as "stretch".** Rejected: a contract that advertises an
+  endpoint the code does not serve is worse than a contract that says the
+  feature was cut deliberately.

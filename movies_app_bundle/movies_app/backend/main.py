@@ -181,8 +181,15 @@ if DIST_DIR.is_dir():
 
 @app.exception_handler(404)
 async def _spa_fallback(request, exc):
+    # History-mode fallback: a non-/api path that StaticFiles could not resolve
+    # is a vue-router route, so serve index.html and let the router match it.
     if not request.url.path.startswith("/api") and DIST_DIR.is_dir():
         index = DIST_DIR / "index.html"
         if index.is_file():
             return FileResponse(index)
-    return JSONResponse({"detail": "Not found"}, status_code=404)
+    # Under /api the routers raise HTTPException(404, "Movie not found") and
+    # friends. This handler sees those too, so it must preserve their detail —
+    # flattening every miss to a generic string is what the SPA would then
+    # show the user.
+    detail = getattr(exc, "detail", None) or "Not found"
+    return JSONResponse({"detail": detail}, status_code=404)

@@ -1,0 +1,8 @@
+/mnt/c/repos/apps/dbx-movies-app/.claude/skills|agent-evaluation
+/mnt/c/repos/apps/dbx-movies-app/.claude/skills|analyze-mlflow-chat-session
+/mnt/c/repos/apps/dbx-movies-app/.claude/skills|analyze-mlflow-trace
+/mnt/c/repos/apps/dbx-movies-app/.claude/skills|instrumenting-with-mlflow-tracing
+/mnt/c/repos/apps/dbx-movies-app/.claude/skills|mlflow-onboarding
+/mnt/c/repos/apps/dbx-movies-app/.claude/skills|querying-mlflow-metrics
+/mnt/c/repos/apps/dbx-movies-app/.claude/skills|retrieving-mlflow-traces
+/mnt/c/repos/apps/dbx-movies-app/.claude/skills|searching-mlflow-docs

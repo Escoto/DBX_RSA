@@ -142,9 +142,27 @@ that is not the repo.
    a **client (BioNTech) workspace that must never be used for this project**.
    Wrap every command:
    `wsl -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/repos/apps/dbx-movies-app/movies_app_bundle && databricks ..."`
-2. **Lakebase costs while running.** Set `stopped: true` in
-   `resources/lakebase.yml` and deploy to pause between sessions; set it back
-   ≥15 min before the demo. `prevent_destroy` is `false` everywhere, so
+2. **Lakebase costs while running — but do not stop or start it with a deploy.**
+   Every `bundle deploy` updates `apps.movies_app`, and an app update makes the
+   platform resolve the app's `database` resource by connecting to the Lakebase
+   endpoint. So **any deploy fails while the instance is stopped or still
+   starting**, with `FAILED_PRECONDITION: ... Endpoint ep-… is disabled. Cannot
+   connect to the pg instance`. Stopping via `stopped: true` + deploy "works"
+   only in the sense that the instance stops before the app update blows up.
+
+   Start and stop out of band instead, and leave `resources/lakebase.yml` at
+   `stopped: false` so a deploy is always safe:
+
+   ```bash
+   databricks database update-database-instance movies-app-dev stopped --json '{"name":"movies-app-dev","stopped":true}' -p movies        # stop
+   databricks database update-database-instance movies-app-dev stopped --json '{"name":"movies-app-dev","stopped":false}' -p movies  # start
+   databricks database get-database-instance movies-app-dev -p movies                             # poll for AVAILABLE
+   ```
+
+   **Order on demo morning: start the instance, wait for `AVAILABLE` (~10–15
+   min), and only then deploy.** Deploying while it is `STARTING` hits the same
+   error. Note `make release` also runs `bundle run movies_app`, which starts app
+   compute — never use it to shut things down. `prevent_destroy` is `false` everywhere, so
    `bundle destroy` deletes the instance **and its data** — only the user runs
    it. Renaming the instance recreates it and changes its DNS; on-platform
    `PGHOST` is injected via `valueFrom` (ADR-005) so a rename is handled at

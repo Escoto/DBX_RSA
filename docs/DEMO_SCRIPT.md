@@ -22,19 +22,30 @@ Have 1, 3 and 4 open in tabs before you start. Do not navigate by typing.
 ## Step zero — the pre-flight (start 30 minutes early, not 5)
 
 Everything here is stopped between sessions and none of it starts instantly.
+Run these in order - deploying before the database is up is the one mistake that
+costs you the most time.
 
-```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/repos/apps/dbx-movies-app/movies_app_bundle && databricks bundle deploy -t dev"
-```
+1. **Start the Lakebase instance first, and wait for it** — ≥15 min ahead.
+   Do this *out of band*, not with a deploy: every deploy updates the app, and
+   an app update cannot resolve its `database` resource while the endpoint is
+   disabled, so a deploy fails against a stopped **or still starting** instance.
 
-1. **Start the Lakebase instance and the app compute** — ≥15 min ahead. If
-   `resources/lakebase.yml` has `stopped: true`, set it to `false` and deploy.
+   From `movies_app_bundle/` inside WSL (`make` does not exist in Git Bash):
+
+   ```bash
+   make start
+   ```
+
+   That starts the instance, polls until `AVAILABLE` printing a dot per 15s
+   (10-15 min, gives up after 20 with the last state), then starts the app.
+   It does **not** deploy. Run `make release` after it finishes if anything has
+   changed since the last deploy - never before or during.
 2. **Re-seed with `--reset`.** Showtime ids are relative to the run date, so the
    window has to be re-cut on the day; `--reset` also clears any test bookings
    so the seat map looks deliberate.
 
    ```bash
-   DATABRICKS_CONFIG_FILE=//wsl.localhost/Ubuntu-24.04/home/raescoto/.databrickscfg DATABRICKS_CONFIG_PROFILE=movies python movies_app_bundle/src/seed/seed_lakebase.py --reset --app-sp-client-id 010ae2f6-6206-498c-a005-17daf4850a48
+   make reseed
    ```
 
    Read the report it prints. `top demand, settled shows` must show **Iron

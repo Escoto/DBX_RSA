@@ -6,6 +6,9 @@ include:
   - resources/*.yml
 
 variables:
+  schedule:
+    default: PAUSED
+
   # -- Lake Base --
   lakebase_instance_name:
     description: Lakebase instance name

@@ -3,18 +3,50 @@ resources:
     analytics_job:
       name: movies-analytics-gold-${bundle.target}
       description: >-
-        Rebuilds the Delta gold tables in movies_analytics_dev.movies from the
-        Lakebase OLTP tables (movies_app_dev.movies, via Unity Catalog). No
-        schedule — run on demand (`databricks bundle run analytics_job`) for
-        the demo.
+        Rebuilds the Delta gold layer in movies_analytics_dev.movies from the
+        Lakebase OLTP tables (movies_app_dev.movies via Unity Catalog). The
+        three gold objects are Materialized Views over a Lakehouse Federation
+        source, but every refresh is a full RECOMPUTE (no CDC from Postgres
+        federation), so there is no incremental-refresh upside here. The win
+        is a governed, UC-native refresh history/status instead of an opaque
+        CTAS. Three separate sql_tasks, scheduled at 6am (stopped by default) / 
+        can run on demand.
+
+      schedule:
+        quartz_cron_expression: "0 0 9 * * ?" # Daily 9 A.M.
+        timezone_id: "Europe/Berlin"
+        pause_status: ${var.schedule}
+
+      # CREATE MATERIALIZED VIEWs and COMMENTs ON COLUMNs for Genie.
       tasks:
-        - task_key: build_gold_tables
+        - task_key: showtime_occupancy
           sql_task:
             warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
             file:
-              path: ../src/analytics/gold.sql
+              path: ../src/analytics/gold_showtime_occupancy.sql
             parameters:
-              analytics_catalog: ${resources.catalogs.movies_analytics.name}
-              analytics_schema: ${resources.schemas.movies.name}
               lakebase_catalog: ${resources.database_catalogs.catalog_movies_db.name}
               lakebase_schema: movies
+              showtime_occupancy_fqn: ${resources.catalogs.movies_analytics.name}.${resources.schemas.movies.name}.showtime_occupancy
+
+        - task_key: demand_by_movie_theater_slot
+          depends_on:
+            # Uses showtime_occupancy MV
+            - task_key: showtime_occupancy
+          sql_task:
+            warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
+            file:
+              path: ../src/analytics/gold_demand_by_movie_theater_slot.sql
+            parameters:
+              showtime_occupancy_fqn: ${resources.catalogs.movies_analytics.name}.${resources.schemas.movies.name}.showtime_occupancy
+              demand_by_movie_theater_slot_fqn: ${resources.catalogs.movies_analytics.name}.${resources.schemas.movies.name}.demand_by_movie_theater_slot
+
+        - task_key: revenue_by_day
+          sql_task:
+            warehouse_id: ${resources.sql_warehouses.movies_analytics_warehouse.id}
+            file:
+              path: ../src/analytics/gold_revenue_by_day.sql
+            parameters:
+              lakebase_catalog: ${resources.database_catalogs.catalog_movies_db.name}
+              lakebase_schema: movies
+              revenue_by_day_fqn: ${resources.catalogs.movies_analytics.name}.${resources.schemas.movies.name}.revenue_by_day

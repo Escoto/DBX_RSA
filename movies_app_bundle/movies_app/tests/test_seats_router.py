@@ -31,6 +31,7 @@ def test_seat_map_header(client, stub):
     assert res.status_code == 200
     head = res.json()["showtime"]
     assert head["showtime_id"] == SHOWTIME_ID
+    assert head["movie_id"] == "mov-01"
     assert head["movie_title"] == "Neon Harbor"
     assert head["auditorium_name"] == "Auditorium 1"
     assert head["price_standard"] == 12.00

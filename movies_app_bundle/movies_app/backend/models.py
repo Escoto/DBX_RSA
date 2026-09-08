@@ -51,6 +51,7 @@ class SeatRow(BaseModel):
 
 class SeatMapShowtime(BaseModel):
     showtime_id: str
+    movie_id: str
     movie_title: str
     auditorium_name: str
     starts_at: datetime

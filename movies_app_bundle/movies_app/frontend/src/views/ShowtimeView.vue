@@ -62,13 +62,6 @@ const submitLabel = computed(() => {
   return n === 0 ? "Book seats" : `Book ${n} ${n === 1 ? "seat" : "seats"}`;
 });
 
-// The seat map payload has no movie_id, so "back" is the browser history
-// when there is one (the normal funnel) and the movies grid otherwise.
-function goBack() {
-  if (window.history.state?.back) router.back();
-  else router.push({ name: "movies" });
-}
-
 function toggle(seatId: string) {
   submitError.value = null;
   const i = selected.value.indexOf(seatId);
@@ -116,9 +109,16 @@ async function book() {
 
 <template>
   <section>
-    <button type="button" class="back" @click="goBack">
+    <router-link
+      :to="
+        seatMap.data.value
+          ? { name: 'movie', params: { id: seatMap.data.value.showtime.movie_id } }
+          : { name: 'movies' }
+      "
+      class="back"
+    >
       ← Back to showtimes
-    </button>
+    </router-link>
 
     <StateBlock
       :loading="seatMap.loading.value && !seatMap.data.value"
@@ -223,12 +223,12 @@ async function book() {
   display: inline-block;
   margin-bottom: var(--spacing-md);
   color: var(--color-primary);
-  background: none;
-  border: none;
-  padding: 0;
-  font: inherit;
   font-size: var(--font-size-sm);
-  cursor: pointer;
+  text-decoration: none;
+}
+
+.back:hover {
+  text-decoration: underline;
 }
 
 .muted {

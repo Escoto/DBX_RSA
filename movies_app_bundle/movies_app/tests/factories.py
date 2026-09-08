@@ -56,6 +56,7 @@ def seatmap_header_row(showtime_id: str = "st-d0-s0-aud-01", **over) -> dict:
     """A row from the seat-map header SELECT in routers/seats.py."""
     row = {
         "showtime_id": showtime_id,
+        "movie_id": "mov-01",
         "auditorium_id": "aud-01",
         "starts_at": "2026-09-10T15:00:00+00:00",
         "price_standard": 12.00,

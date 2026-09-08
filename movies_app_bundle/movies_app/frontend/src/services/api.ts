@@ -50,6 +50,7 @@ export interface SeatRow {
 
 export interface SeatMapShowtime {
   showtime_id: string;
+  movie_id: string;
   movie_title: string;
   auditorium_name: string;
   starts_at: string;

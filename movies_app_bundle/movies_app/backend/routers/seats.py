@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api", tags=["seats"])
 @router.get("/showtimes/{showtime_id}/seats", response_model=SeatMapResponse)
 def get_seat_map(showtime_id: str) -> SeatMapResponse:
     st_rows = db.query(
-        "SELECT st.showtime_id, st.auditorium_id, st.starts_at, "
+        "SELECT st.showtime_id, st.movie_id, st.auditorium_id, st.starts_at, "
         "st.price_standard, st.price_premium, "
         "m.title AS movie_title, a.name AS auditorium_name "
         "FROM showtimes st "
@@ -63,6 +63,7 @@ def get_seat_map(showtime_id: str) -> SeatMapResponse:
     return SeatMapResponse(
         showtime=SeatMapShowtime(
             showtime_id=st["showtime_id"],
+            movie_id=st["movie_id"],
             movie_title=st["movie_title"],
             auditorium_name=st["auditorium_name"],
             starts_at=st["starts_at"],

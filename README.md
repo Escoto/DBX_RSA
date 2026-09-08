@@ -14,7 +14,8 @@ Built for the Databricks Resident Architect take-home exercise.
 > flow — browse, pick a theater and showtime, choose seats on the map, book,
 > and the `409` on a seat lost to a race — is verified **on the deployed app**,
 > and the resulting rows are visible in Catalog Explorer. 108 backend tests
-> pass. Remaining: the bundle job that builds the Delta gold tables.
+> pass. The analytics layer — gold tables, `analytics_job`, the AI/BI dashboard
+> and the Genie space — is built and deployed too.
 
 ---
 
@@ -88,7 +89,7 @@ the signal; it is never told where it is. See ADR-009.
                      ┌──────────────────────────────┐
                      │ Unity Catalog                 │
                      │  movies_app_dev.movies.*      │  browse + query from warehouse movies_analytics
-                     │  movies_analytics_dev.movies.*│  Delta gold tables (analytics_job — planned)
+                     │  movies_analytics_dev.movies.*│  Delta gold tables (built by analytics_job)
                      └──────────────────────────────┘
 
 Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registration, analytics catalog + schema,
@@ -105,7 +106,7 @@ Deploy-time:  databricks bundle deploy         → Lakebase instance, UC registr
 | UI | Vue 3 + Vite + TypeScript, prebuilt to static files | Streamlit/Dash; rejected because a seat map needs a real component model |
 | Transactional store | **Lakebase** (managed Postgres): enforced PK/FK/UNIQUE, row locks, ms commits | Delta via SQL warehouse: no unique constraints, no cross-table transactions, seconds per commit — fine for analytics, wrong for seat allocation |
 | Governance | Lakebase database registered in Unity Catalog (`database_catalogs`) | Copying rows into Delta with a job; unnecessary for browsing and querying the schema |
-| Analytics *(planned)* | Delta gold tables in a bundle-managed catalog, built by a bundle job (`sql_task` on the bundle's own serverless warehouse reading the Lakebase catalog) | Lakeflow Declarative Pipeline; a single SQL task is enough for two gold tables |
+| Analytics | Delta gold tables in a bundle-managed catalog, built by a bundle job (`sql_task` on the bundle's own serverless warehouse reading the Lakebase catalog) | Lakeflow Declarative Pipeline; a single SQL task is enough for three gold tables |
 | App → DB auth | App's own service principal + short-lived OAuth token via the Databricks SDK | Native Postgres passwords; disabled on the instance |
 | Infrastructure as code | Databricks Asset Bundles, direct engine, one `dev` target: database, catalogs, schema, warehouse, and app in one bundle | Manual UI setup; bundles make every asset the panel sees reproducible from the repo |
 

@@ -13,6 +13,9 @@ const router = useRouter();
 // Same cap as CreateBookingRequest.seat_ids (1..8) on the backend.
 const MAX_SEATS = 8;
 
+// Very basic validation email check.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 const seatMap = useAsync(() => api.getSeatMap(props.id));
 onMounted(seatMap.run);
 
@@ -43,11 +46,13 @@ const total = computed(() =>
   selectedSeats.value.reduce((sum, s) => sum + s.price, 0),
 );
 
+const emailValid = computed(() => EMAIL_RE.test(customer.value.email.trim()));
+
 const canSubmit = computed(
   () =>
     selected.value.length > 0 &&
     customer.value.name.trim().length > 0 &&
-    customer.value.email.trim().length > 0 &&
+    emailValid.value &&
     !submitting.value,
 );
 
@@ -186,7 +191,15 @@ async function book() {
               autocomplete="email"
               required
               maxlength="200"
+              :pattern="EMAIL_RE.source"
+              title="Please enter a valid email address"
             />
+            <span
+              v-if="customer.email.trim().length > 0 && !emailValid"
+              class="field-hint"
+            >
+              Please enter a valid email address
+            </span>
           </label>
 
           <p v-if="submitError" class="error" role="alert">
@@ -313,6 +326,11 @@ async function book() {
   outline: 2px solid var(--color-primary);
   outline-offset: 1px;
   border-color: var(--color-primary);
+}
+
+.field-hint {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
 }
 
 .btn {

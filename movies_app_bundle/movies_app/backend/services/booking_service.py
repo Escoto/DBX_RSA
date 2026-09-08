@@ -103,8 +103,22 @@ def create_booking(
                 (booking_id, showtime_id, seat_ids),
             )
             if cur.rowcount != len(seat_ids):
+                # Unreachable in a quiet system: step 1 already proved every
+                # seat belongs to this auditorium, and the composite FKs make
+                # a wrong-room seat unrepresentable. It fires only if the seat
+                # set moved under us between validation and INSERT -- a seat
+                # row deleted, or the showtime reassigned to another
+                # auditorium.
+                logger.error(
+                    "booking_seats rowcount mismatch: "
+                    "showtime=%s expected=%d got=%d",
+                    showtime_id,
+                    len(seat_ids),
+                    cur.rowcount,
+                )
                 raise ValidationError(
-                    f"Expected {len(seat_ids)} seat rows, got {cur.rowcount}"
+                    "Those seats are no longer available for this showtime. "
+                    "Reload the seat map and try again."
                 )
 
             cur.execute(

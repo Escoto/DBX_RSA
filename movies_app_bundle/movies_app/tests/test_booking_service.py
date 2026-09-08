@@ -1,8 +1,8 @@
 """Tests for the booking write path (§4.4).
 
 Covers: happy path, unique-violation → ConflictError with taken seat ids,
-and validation failures (showtime not found, past showtime, invalid seats,
-duplicate seat ids).
+validation failures (showtime not found, past showtime, invalid seats,
+duplicate seat ids), and the rowcount guard behind the composite FKs.
 
 Run from movies_app/:
     pip install -r requirements-dev.txt
@@ -11,6 +11,7 @@ Run from movies_app/:
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -233,3 +234,39 @@ def test_duplicate_seat_ids(mock_db):
         create_booking("st-1", ["aud-01-A01", "aud-01-A01"], "Alice", "a@b.com")
 
     assert "duplicate" in exc_info.value.detail.lower()
+
+
+# ---- rowcount guard: the seat set moved under us mid-transaction ----
+
+
+@patch("backend.services.booking_service.db")
+def test_short_rowcount_aborts_and_hides_the_counts(mock_db, caplog):
+    # Step 1 passed -- both seats resolved to this auditorium -- but the
+    # INSERT ... SELECT then matched only one row. The customer must not be
+    # shown the raw counts; the log must keep them.
+    mock_db.query.side_effect = [
+        [{"showtime_id": "st-1", "auditorium_id": "aud-01"}],
+        [{"seat_id": "aud-01-A01"}, {"seat_id": "aud-01-A02"}],
+    ]
+    cur = _happy_cursor()
+    original = cur.execute.side_effect
+
+    def _short(sql, params=None):
+        original(sql, params)
+        if "INSERT INTO booking_seats" in sql:
+            cur.rowcount = 1
+
+    cur.execute.side_effect = _short
+    mock_db.transaction = _fake_transaction(cur)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(ValidationError) as exc_info:
+            create_booking(
+                "st-1", ["aud-01-A01", "aud-01-A02"], "Alice", "a@b.com"
+            )
+
+    detail = exc_info.value.detail
+    assert "no longer available" in detail
+    assert "rowcount" not in detail.lower()
+    assert not any(ch.isdigit() for ch in detail), detail
+    assert "expected=2 got=1" in caplog.text

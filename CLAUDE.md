@@ -70,7 +70,8 @@ followed (ADR-006), which required turning every `/api` handler from
 
 **Phase 6 in progress.** Repository review; the pytest suite went from 7 to 107
 cases (routers, app shell, `/api/health`, `db.py`, pool backpressure) with
-`pytest.ini` and a `make test` target (108 after B7/B13/B16 follow-ups); a real
+`pytest.ini` and a `make test` target (106 after B7/B13/B16 and the
+dead-code cleanup); a real
 bug fixed (the SPA 404 handler
 was discarding the routers' 404 details); ADR-006 rewritten after shipping
 literal control characters; ADR-007 records cancellation as cut; ADR-008
@@ -231,7 +232,7 @@ Deploy:  bundle deploy            → all resources; uploads movies_app/
 serve.py       entrypoint: uvicorn.run(app, host=0.0.0.0, port=DATABRICKS_APP_PORT or 8000)
 main.py        FastAPI app, routers, global exception handler, SPA mount + history fallback
 config.py      Settings from env: LAKEBASE_*, PGHOST/PGPORT/PGUSER/PGPASSWORD/PGSSLMODE if injected
-db.py          connection factory, query() / execute(), transaction() context manager
+db.py          connection factory, query(), transaction() context manager
 models.py      Pydantic v2 request/response models
 routers/       catalog.py (movies, theaters, showtimes) · seats.py (seat map) · bookings.py
 services/      booking_service.py — the §4.4 transaction
@@ -374,7 +375,7 @@ movies_app_bundle/
     ├── app.yaml, package.json, requirements.txt, requirements-dev.txt, Makefile
     ├── backend/  (§4.2)     frontend/  Vue 3 + Vite + TS
     ├── pytest.ini           testpaths, pythonpath; `make test` is the gate
-    └── tests/               108 cases. Only backend.db is stubbed, so they need
+    └── tests/               106 cases. Only backend.db is stubbed, so they need
                              no credentials and pass with Lakebase stopped
 ```
 

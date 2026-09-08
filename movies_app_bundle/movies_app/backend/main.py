@@ -196,15 +196,12 @@ def health() -> dict:
         result["token_error"] = f"{type(exc).__name__}: {exc}"
         return result
 
-    # Step 4: connect and run SELECT 1
+    # Step 4: connect and test SELECT
     try:
-        if settings.pg_pool_enabled:
-            # When pool is enabled, use a temporary direct connection just to verify
-            # connectivity for the health check without affecting pool stats
-            conn = db.get_connection()
-        else:
-            conn = db.get_connection()
-
+        # Direct connection proving the credential path end to end,
+        # so it must not be served by a warm pooled connection that 
+        # skips it.
+        conn = db.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")

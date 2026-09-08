@@ -8,8 +8,8 @@ signed-in user, `PGPASSWORD` over `generate_database_credential`). ADR-005 was
 caused by getting the host rule wrong on the platform, and it cost an outage
 that could not be reproduced locally, so each branch is pinned.
 
-*Connection lifetime.* The same ADR fixed a psycopg 3 leak: `query()` and
-`execute()` opened a connection and never closed it. A leak does not fail a
+*Connection lifetime.* The same ADR fixed a psycopg 3 leak: `query()`
+opened a connection and never closed it. A leak does not fail a
 test by itself — it exhausts the server hours later — so the tests assert
 `close()` was called, including on the exception path.
 
@@ -260,15 +260,6 @@ def test_query_closes_the_connection_on_error(no_pool, monkeypatch):
         db.query("SELECT 1")
 
     assert conn.closed, "a failing query must still return its connection"
-
-
-def test_execute_closes_the_connection(no_pool, monkeypatch):
-    conn = FakeConnection(FakeCursor(rowcount=3))
-    monkeypatch.setattr(db, "get_connection", lambda: conn)
-
-    assert db.execute("UPDATE movies SET title = %s", ("x",)) == 3
-    assert conn.closed
-    assert conn.commits == 1
 
 
 def test_transaction_commits_and_closes(no_pool, monkeypatch):

@@ -1,5 +1,9 @@
 """Lakebase connection factory.
 
+Reads go through query(); every write is a multi-statement transaction and
+goes through transaction(), so there is deliberately no single-statement
+write helper here.
+
 Credentials: OAuth token minted via the Databricks SDK, cached for 50 minutes
 (tokens valid ~1 hour). Host resolved from PGHOST (platform-injected) or the
 SDK's get_database_instance(). Connections come from a psycopg pool when
@@ -195,20 +199,3 @@ def query(sql: str, params: tuple[Any, ...] | None = None) -> list[dict[str, Any
         cur.execute(sql, params)
         cols = [desc[0] for desc in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def execute(sql: str, params: tuple[Any, ...] | None = None) -> int:
-    if not settings.pg_pool_enabled:
-        conn = get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                conn.commit()
-                return cur.rowcount
-        finally:
-            conn.close()
-
-    with get_pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(sql, params)
-        conn.commit()
-        return cur.rowcount

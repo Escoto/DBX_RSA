@@ -170,11 +170,8 @@ export const api = {
   getMovie: (movieId: string) =>
     request<Movie>(`/api/movies/${encodeURIComponent(movieId)}`),
   listTheaters: () => request<Theater[]>("/api/theaters"),
-  listShowtimes: (filters: {
-    movie_id?: string;
-    theater_id?: string;
-    date?: string;
-  }) => request<Showtime[]>(`/api/showtimes${qs(filters)}`),
+  listShowtimes: (filters: { movie_id?: string; theater_id?: string }) =>
+    request<Showtime[]>(`/api/showtimes${qs(filters)}`),
   getSeatMap: (showtimeId: string) =>
     request<SeatMapResponse>(
       `/api/showtimes/${encodeURIComponent(showtimeId)}/seats`,

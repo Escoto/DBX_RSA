@@ -213,7 +213,7 @@ Full notes: `docs/DATA_MODEL.md`.
 | GET | `/api/movies` | list movies |
 | GET | `/api/movies/{movie_id}` | movie detail |
 | GET | `/api/theaters` | list theaters |
-| GET | `/api/showtimes?movie_id=&theater_id=&date=` | showtimes with movie, theater, auditorium names |
+| GET | `/api/showtimes?movie_id=&theater_id=` | showtimes with movie, theater, auditorium names |
 | GET | `/api/showtimes/{showtime_id}/seats` | seat map with per-seat price and `available` / `booked` status |
 | POST | `/api/bookings` | book seats → `201` booking, `409` with `taken_seat_ids`, `422` on validation |
 | GET | `/api/bookings/{booking_id}` | booking with seats |

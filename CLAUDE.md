@@ -303,7 +303,7 @@ two.
 | GET | `/api/health` | status + step-by-step credential/connection diagnostics + `SELECT 1` |
 | GET | `/api/movies` · `/api/movies/{id}` | `Movie[]` · `Movie` |
 | GET | `/api/theaters` | `Theater[]` |
-| GET | `/api/showtimes?movie_id=&theater_id=&date=` | `Showtime[]` (joined with movie, theater, auditorium names) |
+| GET | `/api/showtimes?movie_id=&theater_id=` | `Showtime[]` (joined with movie, theater, auditorium names) |
 | GET | `/api/showtimes/{id}/seats` | `{showtime, rows: [{row_label, seats: [...]}]}` |
 | POST | `/api/bookings` | 201 `Booking` / 409 `{detail, taken_seat_ids}` / 422 |
 | GET | `/api/bookings/{id}` | `Booking` with seats |

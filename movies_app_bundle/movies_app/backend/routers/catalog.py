@@ -32,7 +32,6 @@ def list_theaters() -> list[dict]:
 def list_showtimes(
     movie_id: str | None = Query(None),
     theater_id: str | None = Query(None),
-    date: str | None = Query(None),
 ) -> list[dict]:
     # Past showtimes are excluded so the frontend shows only bookable times.
     sql = (
@@ -54,8 +53,5 @@ def list_showtimes(
     if theater_id is not None:
         sql += " AND t.theater_id = %s"
         params.append(theater_id)
-    if date is not None:
-        sql += " AND (st.starts_at AT TIME ZONE 'UTC')::date = %s::date"
-        params.append(date)
     sql += " ORDER BY st.starts_at, t.name, a.name"
     return db.query(sql, tuple(params) if params else None)

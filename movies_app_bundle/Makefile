@@ -5,7 +5,10 @@ CYAN := \033[0;36m
 GREEN := \033[0;32m
 RESET := \033[0m
 
-APP_SP_CLIENT_ID := 010ae2f6-6206-498c-a005-17daf4850a48
+# The app's service principal is created with the app and changes whenever the
+# app is recreated, so it is resolved from the deployed app at seed time rather
+# than written here. Override with APP_SP_CLIENT_ID=<id> if needed.
+APP_SP_CLIENT_ID ?=
 PROFILE          := movies
 INSTANCE         := movies-app-dev
 APP              := movies-app-dev
@@ -14,6 +17,15 @@ START_MAX_POLLS  := 80
 # WSL has no bare `python` — only python3 / python3.11 — and 3.11 is the
 # one carrying psycopg + databricks-sdk, matching the Apps runtime.
 PYTHON           := python3.11
+
+# $(call SEED,<extra args>): resolve the app SP, refuse to run without it, seed.
+define SEED
+	@sp="$(APP_SP_CLIENT_ID)"; \
+	test -n "$$sp" || sp=$$(databricks apps get $(APP) -p $(PROFILE) -o json | $(PYTHON) -c "import json,sys; print(json.load(sys.stdin).get('service_principal_client_id',''))"); \
+	test -n "$$sp" || { echo "Could not resolve the service principal of app $(APP). Is it deployed?"; exit 1; }; \
+	echo "Granting to app service principal $$sp"; \
+	DATABRICKS_CONFIG_PROFILE=$(PROFILE) $(PYTHON) src/seed/seed_lakebase.py --app-sp-client-id $$sp $(1)
+endef
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "$(GREEN)%-12s$(RESET) %s\n", $$1, $$2}'
@@ -50,15 +62,15 @@ stop: ## Stop the app, then the database. Order matters.
 
 seed: ## Apply ddl.sql and load/update seed data; no data is destroyed.
 	@echo "$(CYAN)Seeding Lakebase...$(RESET)"
-	@DATABRICKS_CONFIG_PROFILE=$(PROFILE) $(PYTHON) src/seed/seed_lakebase.py --app-sp-client-id $(APP_SP_CLIENT_ID)
+	$(call SEED,)
 	@echo "$(GREEN)Done.$(RESET)"
 
 reseed: ## Truncate all tables and reload fresh seed data.
 	@echo "$(CYAN)Re-seeding Lakebase (truncate + reload)...$(RESET)"
-	@DATABRICKS_CONFIG_PROFILE=$(PROFILE) $(PYTHON) src/seed/seed_lakebase.py --app-sp-client-id $(APP_SP_CLIENT_ID) --reset
+	$(call SEED,--reset)
 	@echo "$(GREEN)Done.$(RESET)"
 
 recreate-ddl: ## Drop and rebuild the schema, then reload seed data.
 	@echo "$(CYAN)Recreating schema from ddl.sql...$(RESET)"
-	@DATABRICKS_CONFIG_PROFILE=$(PROFILE) $(PYTHON) src/seed/seed_lakebase.py --app-sp-client-id $(APP_SP_CLIENT_ID) --recreate
+	$(call SEED,--recreate)
 	@echo "$(GREEN)Done.$(RESET)"

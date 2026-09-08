@@ -49,9 +49,16 @@ path including the `409` on a raced seat is verified on the deployed app.
    invented `widgetType` with a `200`, so a clean deploy proves nothing. Fix in
    the UI, then round-trip with `bundle generate dashboard`.
 
-**Demo pre-flight** is Step zero of `docs/DEMO_SCRIPT.md`: `make start` at
-least 30 minutes ahead, `make reseed`, `bundle run analytics_job`, warm the
-warehouse and the dashboard, check `/api/health` says `db: connected`.
+**Demo pre-flight, in order, starting 30 minutes ahead:**
+
+1. `make start` (Lakebase takes 10 to 15 min to reach `AVAILABLE`; the app
+   starts after it).
+2. `make release` only if the repo has moved since the last deploy.
+3. `make reseed`, then `databricks bundle run analytics_job -t dev`. The gold
+   views are a snapshot, so until the job runs the demand page and Genie
+   describe the previous window. The live page needs no rebuild.
+4. Open the dashboard once to warm the serverless warehouse (about 20 s cold,
+   20 min auto-stop), and check `/api/health` reports `db: connected`.
 
 **Cut, not deferred:** cancellation (ADR-007). **Deferred:** seat holds with
 expiry, idempotency keys, the pooling items in ADR-006's *Deferred* table.
@@ -79,6 +86,14 @@ expiry, idempotency keys, the pooling items in ADR-006's *Deferred* table.
 6. **Secrets.** `.claude/settings.local.json` holds a Bedrock API key; the WSL
    `~/.databrickscfg` holds a PAT. Never print, copy or reference either.
 7. Two unrelated GxP apps exist in the workspace. Leave them alone.
+8. **Recreating from scratch changes every id but no name.** After
+   `destroy → deploy` the warehouse, dashboard, Genie space, job and the app's
+   service principal all get new ids; the resource names and catalog names do
+   not, because they come from bundle variables plus the target. `make seed`
+   resolves the new service principal itself. The dashboard and Genie JSON
+   carry the catalog names as literals (bundle variables do not reach inside
+   `file_path` content), so they survive a recreate but need a search-and-
+   replace if the target or the catalog variables are ever renamed.
 
 ---
 
@@ -204,12 +219,12 @@ Windows has Node 22 and npm 10; WSL has no Node. **The Apps runtime is Python
 | Lakebase database / schema | `movies_dev` / `movies` |
 | UC catalog for Lakebase | `movies_app_dev` (key `catalog_movies_db`) |
 | Analytics catalog.schema | `movies_analytics_dev.movies` (keys `movies_analytics`, `movies`) |
-| SQL warehouse | `movies_analytics`, id `72704e9c199eb256` (key `movies_analytics_warehouse`). **The id changes on recreate**; reference it as `${resources.sql_warehouses.movies_analytics_warehouse.id}`, never as a literal |
-| AI/BI dashboard | `Movies — live operations and demand`, id `01f1aabfa9f11c97981e76b48407fa28` (key `movies_operations`) |
-| Genie space | `Movies — cinema demand`, id `01f1aabfd22f1ac5a20063d5511ba352` (key `movies_demand`) |
-| Analytics job | `movies-analytics-gold-dev`, id `743598470449255` (key `analytics_job`) |
-| App | `movies-app-dev` (key `movies_app`) · `https://movies-app-dev-2485046985091381.aws.databricksapps.com` |
-| App SP client id | `010ae2f6-6206-498c-a005-17daf4850a48` |
+| SQL warehouse | `movies_analytics` (key `movies_analytics_warehouse`). In YAML always `${resources.sql_warehouses.movies_analytics_warehouse.id}`, never a literal id |
+| AI/BI dashboard | `Movies — live operations and demand` (key `movies_operations`) |
+| Genie space | `Movies — cinema demand` (key `movies_demand`) |
+| Analytics job | `movies-analytics-gold-dev` (key `analytics_job`) |
+| App | `movies-app-dev` (key `movies_app`) · `https://movies-app-dev-2485046985091381.aws.databricksapps.com` (name + workspace id, stable across recreates) |
+| Ids and URLs | Not recorded here because they change on recreate. `databricks bundle summary -t dev` prints them; `databricks apps get movies-app-dev -p movies` gives the app's service principal |
 
 ---
 

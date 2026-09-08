@@ -151,6 +151,17 @@ before starting the app. Deploy only while the instance is running: an app
 update has to reach the database endpoint, so a deploy against a stopped or
 starting instance fails.
 
+### Recreating from scratch
+
+`databricks bundle destroy` deletes the Lakebase instance and its data, both
+catalogs, the warehouse, the app, the job, the dashboard and the Genie space.
+To rebuild: deploy, wait for the Lakebase instance, `make seed`, then run the
+analytics job. Every resource keeps its name, since names come from bundle
+variables and the target, but every id and the app's service principal are
+new. The seed target resolves the new service principal itself. The dashboard
+and Genie definitions reference the catalogs by name, so they need editing only
+if the target or the catalog variables are renamed.
+
 ### Run locally
 
 From `movies_app_bundle/movies_app/`:

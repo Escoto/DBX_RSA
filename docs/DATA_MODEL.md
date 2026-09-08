@@ -1,7 +1,7 @@
 # Data Model
 
 The system of record is **Lakebase** — Databricks-managed Postgres 16 — on
-instance `movies-app-dev`, database `movies`, schema `movies`. The database is
+instance `movies-app-dev`, database `movies_dev`, schema `movies`. The database is
 registered in Unity Catalog as catalog `movies_app_dev`, so the same seven
 tables are browsable in Catalog Explorer and queryable from the SQL warehouse
 without any ETL.
@@ -72,8 +72,8 @@ erDiagram
         timestamptz cancelled_at
     }
     BOOKING_SEATS {
-        uuid    booking_id PK-FK
-        text    seat_id PK-FK
+        uuid    booking_id PK, FK
+        text    seat_id PK, FK
         text    showtime_id FK
         text    auditorium_id FK
         numeric price

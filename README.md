@@ -198,27 +198,6 @@ with the database layer stubbed, so it needs no credentials.
 
 ---
 
-## Taking it to millions of users
-
-- **Lakebase capacity.** Scale the instance (CU_1 to CU_8), add readable
-  secondaries for seat-map reads, use child instances for staging branches. Add
-  a `seat_holds` table with expiry for checkout timers and idempotency keys on
-  booking requests.
-- **Reference data from the lakehouse.** Curate movies, theaters and schedules
-  in Delta and push them into Lakebase with synced tables, so the app only
-  writes bookings.
-- **Analytics.** Lakeflow Declarative Pipelines from bronze to gold, with the
-  dashboard and Genie already reading governed materialized views over the
-  Unity Catalog registration of the Lakebase database.
-- **API tier.** Pooling with token refresh is already in place. What remains is
-  a stateless API behind a CDN, horizontal scaling across app instances and
-  per-client rate limiting.
-- **Operations.** Unity Catalog audit logs and system tables for observability,
-  regional Lakebase instances for multi-region, and bundles promoted from dev
-  through staging to prod by a service principal.
-
----
-
 ## How AI was used
 
 The exercise asks for AI as a force multiplier. The running log of what was

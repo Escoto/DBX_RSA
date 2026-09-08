@@ -101,7 +101,7 @@ and re-applies the DDL, followed by the normal deterministic seed.
 - Any real data would be destroyed by a schema change. Acceptable here and only
   here: the data is seed data, deterministic and regenerable byte-for-byte.
 - Production would use versioned migrations (Alembic, or numbered SQL files with
-  a `schema_version` table). Called out in `SCALE_TO_MILLIONS.md`.
+  a `schema_version` table).
 
 ### Note
 

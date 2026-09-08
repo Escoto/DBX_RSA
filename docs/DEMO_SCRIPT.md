@@ -173,7 +173,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/repos/apps/dbx-movies-app/movies_app_
 
 Close on the trade-off you most want them to probe (pick one, do not list all
 three): the OLTP/lakehouse split; the enforced-invariant write path; or what
-changes at millions of users (README § *Taking it to millions*).
+changes at millions of users.
 
 ---
 
